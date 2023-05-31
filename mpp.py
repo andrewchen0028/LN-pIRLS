@@ -41,7 +41,7 @@ def fee_msat(s: Orid, d: Orid, a: int) -> float:
 
 
 # Amount (sats), linearization segments, HTLC size increment (sats)
-A, N, Q = 50e6, 5, 1000
+A, N, Q = int(50e6), 5, 1000
 
 # Source and destination LNIDs
 S = Lnid("03efccf2c383d7bf340da9a3f02e2c23104a0e4fe8ac1a880c8e2dc92fbdacd9df")
@@ -59,17 +59,17 @@ for e in channels:
 lnid_to_orid: dict[Lnid, Orid] = {lnid: Orid(i) for i, lnid in enumerate(lnids)}
 orid_to_lnid: dict[Orid, Lnid] = {Orid(i): lnid for i, lnid in enumerate(lnids)}
 
-# Initialize channel graph and linearized arcs
+# Initialize channel graph and linearized arc list
 arcs: list[McfArc] = []
 G: dict[Orid, dict[Orid, Channel]] = {lnid_to_orid[lnid]: {} for lnid in lnids}
 
+# Put channels into channel graph, combining parallel channels
 for e in channels:
-    # Put channels into channel graph, combining parallel channels
-    # FIXME: use optimal linearization
     s, d = lnid_to_orid[e["s"]], lnid_to_orid[e["d"]]
     c = G[s][d].capacity + e["c"] if d in G[s] else e["c"]
     u = G[s][d].balance + e["b"] if d in G[s] else e["b"]
 
+    # FIXME: use optimal linearization
     G[s][d] = Channel(c, e["r"], e["b"], u)
     for i in range(N):
         arcs.append(McfArc(s, d, int(e["c"] / (N * Q)), (i + 1) * int(cmax / e["c"])))
@@ -91,14 +91,17 @@ if status != mcf.OPTIMAL:
     print(f"Error: min cost flow solver returned {status}")
     exit(1)
 
-# Create payment from all nonzero linearized flows
-payment: dict[tuple[Orid, Orid], int] = {}
+# Create payment flow, combining linearized arc flows
+payment: dict[Orid, dict[Orid, int]] = {}
 for i in range(mcf.num_arcs()):
     if mcf.flow(i):
         s: Orid = mcf.tail(i)
         d: Orid = mcf.head(i)
         f: int = mcf.flow(i) * Q
-        payment[(s, d)] = payment[(s, d)] + f if (s, d) in payment else f
+        if s not in payment:
+            payment[s] = {d: f}
+        else:
+            payment[s][d] = payment[s][d] + f if d in payment[s] else f
 
 print(
     f"Paying {(A / 100.0e6):4.2f} BTC from {lnid_to_orid[S]}({S[:7]}...) to"
@@ -111,17 +114,18 @@ print(
 
 # Print all flows and compute total probability/fees
 total_fee, total_probability = 0, 1
-for (s, d), f in payment.items():
-    channel_probability = uniform_probability(s, d, f)
-    fee = fee_msat(s, d, f) / 1000
-    total_fee += fee
-    total_probability *= channel_probability
-    print(
-        f"({s:>5}, {d:>5})\t"
-        f"{f:>10} / {G[s][d].capacity:>10}\t"
-        f"{channel_probability:^10.3f}\t"
-        f"{fee:>10.3f}"
-    )
+for s, outflows in sorted(payment.items()):
+    for d, f in sorted(outflows.items()):
+        channel_probability = uniform_probability(s, d, f)
+        fee = fee_msat(s, d, f) / 1000
+        total_fee += fee
+        total_probability *= channel_probability
+        print(
+            f"({s:>5}, {d:>5})\t"
+            f"{f:>10} / {G[s][d].capacity:>10}\t"
+            f"{channel_probability:^10.3f}\t"
+            f"{fee:>10.3f}"
+        )
 
 print(f"\n{'Total probability: ':20}{total_probability * 100:>6.3f} %")
 print(f"{'Total fee: ':20}{total_fee:6.3f} sats")
@@ -129,4 +133,30 @@ print(f"{'Fee rate: ':20}{(total_fee * 100.0 / A):>6.3f} %")
 print(f"{'Arcs: ':20}{len(payment):>6}")
 
 # Break down payment into individual HTLCs
-htlcs: list[tuple[list[tuple[Orid, Orid]], int]] = []
+htlcs: list[tuple[list[Orid], int]] = []
+
+remaining_amt = A
+
+while remaining_amt:
+    curr, next = lnid_to_orid[S], None
+    path: list[Orid] = []
+    amt: int = remaining_amt
+    while curr != lnid_to_orid[D]:
+        next = sorted(payment[curr].keys())[0]
+        path.append(curr)
+        amt = min(amt, payment[curr][next])
+        curr = next
+    path.append(curr)
+    htlcs.append((path, amt))
+    remaining_amt -= amt
+    for s, d in zip(path, path[1:]):
+        payment[s][d] -= amt
+        if payment[s][d] == 0:
+            del payment[s][d]
+
+print(f"\n{len(htlcs)} HTLCs")
+for i, (path, amt) in enumerate(htlcs):
+    print(f"{i + 1:>2}: {amt:>10} sats\t", end="")
+    for orid in path[:-1]:
+        print(f"{orid:5}", end=" - ")
+    print(f"{path[-1]:5}")
