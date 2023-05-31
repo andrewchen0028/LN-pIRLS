@@ -3,9 +3,12 @@ import json, time
 from ortools.graph.python import min_cost_flow  # type: ignore
 
 
-# fmt: off
-class Lnid(str): pass
-class Orid(int): pass
+class Lnid(str):
+    pass
+
+
+class Orid(int):
+    pass
 
 
 class McfArc:
@@ -15,11 +18,15 @@ class McfArc:
 
 
 class Channel:
-    def __init__(self, capacity: int, prop_fee: int, base_fee: int,
-                 balance: int, lower_bound: int, upper_bound: int) -> None:
-        self.capacity, self.prop_fee, self.base_fee = capacity, prop_fee, base_fee
-        self.balance, self.lower, self.upper = balance, lower_bound, upper_bound
-# fmt: on
+    def __init__(
+        self, capacity: int, prop_fee: int, base_fee: int, balance: int
+    ) -> None:
+        self.capacity = capacity
+        self.prop_fee = prop_fee
+        self.base_fee = base_fee
+        self.balance = balance
+        self.lower = 0
+        self.upper = capacity
 
 
 def uniform_probability(s: Orid, d: Orid, a: int) -> float:
@@ -59,10 +66,13 @@ G: dict[Orid, dict[Orid, Channel]] = {lnid_to_orid[lnid]: {} for lnid in lnids}
 for e in channels:
     # Put channels into channel graph, combining parallel channels
     # FIXME: use optimal linearization
-    s, d, c = lnid_to_orid[e["s"]], lnid_to_orid[e["d"]], e["c"]
-    G[s][d] = Channel(c, e["r"], e["b"], e["b"], 0, c)
+    s, d = lnid_to_orid[e["s"]], lnid_to_orid[e["d"]]
+    c = G[s][d].capacity + e["c"] if d in G[s] else e["c"]
+    u = G[s][d].balance + e["b"] if d in G[s] else e["b"]
+
+    G[s][d] = Channel(c, e["r"], e["b"], u)
     for i in range(N):
-        arcs.append(McfArc(s, d, int(c / (N * Q)), (i + 1) * int(cmax / c)))
+        arcs.append(McfArc(s, d, int(e["c"] / (N * Q)), (i + 1) * int(cmax / e["c"])))
 
 # Invoke solver
 mcf = min_cost_flow.SimpleMinCostFlow()
@@ -83,11 +93,11 @@ if status != mcf.OPTIMAL:
 
 # Create payment from all nonzero linearized flows
 payment: dict[tuple[Orid, Orid], int] = {}
-for orid in range(mcf.num_arcs()):
-    if mcf.flow(orid):
-        s: Orid = mcf.tail(orid)
-        d: Orid = mcf.head(orid)
-        f: int = mcf.flow(orid) * Q
+for i in range(mcf.num_arcs()):
+    if mcf.flow(i):
+        s: Orid = mcf.tail(i)
+        d: Orid = mcf.head(i)
+        f: int = mcf.flow(i) * Q
         payment[(s, d)] = payment[(s, d)] + f if (s, d) in payment else f
 
 print(
@@ -117,3 +127,6 @@ print(f"\n{'Total probability: ':20}{total_probability * 100:>6.3f} %")
 print(f"{'Total fee: ':20}{total_fee:6.3f} sats")
 print(f"{'Fee rate: ':20}{(total_fee * 100.0 / A):>6.3f} %")
 print(f"{'Arcs: ':20}{len(payment):>6}")
+
+# Break down payment into individual HTLCs
+htlcs: list[tuple[list[tuple[Orid, Orid]], int]] = []
