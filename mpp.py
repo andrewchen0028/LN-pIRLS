@@ -22,10 +22,10 @@ class Channel:
 
 
 class Onion:
-    def __init__(self, path: list[int], amount: int, s_fail: int) -> None:
+    def __init__(self, path: list[int], amount: int, s_fail_index: int) -> None:
         self.path = path
         self.amount = amount
-        self.s_fail = s_fail
+        self.s_fail_index = s_fail_index
 
 
 def edge_probability(s: int, d: int, x: int) -> float:
@@ -74,17 +74,20 @@ def print_onions(onions: list[Onion]):
     print(f"\n{'HTLC':>4}\t{'Amount (sats)':<14}\t{'Path':^10}")
     for i, onion in enumerate(onions):
         print(
-            f"{i + 1:>4}{' X' if onion.s_fail != -1 else ''}\t{onion.amount:>14,}",
+            (
+                f"{i + 1:>4}{' X' if onion.s_fail_index != -1 else ''}\t{onion.amount:>14,}"
+            ),
             end="\t[",
         )
-        upstream = True
-        for orid in onion.path[:-1]:
-            print(f"{orid:>5}", end="")
-            if orid == onion.s_fail:
-                print(f"-| ", end="")
-                upstream = False
-            else:
-                print(f"{'-->' if upstream else '   '}", end="")
+        if onion.s_fail_index == -1:
+            for orid in onion.path[:-1]:
+                print(f"{orid:>5}", end="-->")
+        else:
+            for orid in onion.path[: onion.s_fail_index]:
+                print(f"{orid:>5}", end="-->")
+            print(f"{onion.path[onion.s_fail_index]:>5}", end="-| ")
+            for orid in onion.path[onion.s_fail_index + 1 : -1]:
+                print(f"{orid:>5}", end="   ")
         print(f"{lnid_to_orid[D]}]")
 
 
@@ -100,7 +103,7 @@ def flow_to_onions(
         curr, next = lnid_to_orid[S], None
         path: list[int] = []
         amt = remaining
-        s_fail: int = -1
+        s_fail_index: int = -1
 
         # Find path and amount
         while curr != lnid_to_orid[D]:
@@ -111,23 +114,23 @@ def flow_to_onions(
         path.append(curr)
 
         # Decrement remaining payment flow and update balance graph
-        for s, d in zip(path, path[1:]):
+        for i, (s, d) in enumerate(zip(path, path[1:])):
             flow[s][d] -= amt
             balance_graph[s][d] -= amt
             if flow[s][d] == 0:
                 del flow[s][d]
-            if balance_graph[s][d] < 0 and s_fail == -1:
-                s_fail = s
+            if balance_graph[s][d] < 0 and s_fail_index == -1:
+                s_fail_index = i
 
         # Add onion to list
-        onions.append(Onion(path, amt, s_fail))
+        onions.append(Onion(path, amt, s_fail_index))
         remaining -= amt
 
     return onions
 
 
 # Set parameters
-A, N, Q = int(100e6), 5, 1000
+A, N, Q = int(10e6), 5, 1000
 S = "03efccf2c383d7bf340da9a3f02e2c23104a0e4fe8ac1a880c8e2dc92fbdacd9df"
 D = "021c97a90a411ff2b10dc2a8e32de2f29d2fa49d41bfbb52bd416e460db0747d0d"
 USE_KNOWN_BALANCES = False
@@ -229,57 +232,71 @@ onions: list[Onion] = flow_to_onions(flow, balance_graph)
 print_onions(onions)
 
 
-# TODO: Update bounds for failed, upstream, and successful channels
-# Get failed arcs
-for s, outflows in sorted(flow.items()):
-    for d, f in sorted(outflows.items()):
-        if f > G[s][d].u:
-            G[s][d].upper = f
-
-
 """
-    Channel               Flow /      Capacity   P_e(x_e)         Fee   Failed?
-(16152,  3674)      12,119,000 /    16,777,215    0.278           16203   [X]
-
 HTLC    Amount (sats)      Path
-  10         2,410,000  [16152--> 3674-->  201-->17606]
-  11 X       3,000,000  [16152-|  3674    3043     201   17606]
-  12 X       3,354,000  [16152-|  3674   10690   11001    3611   17606]
-  13 X       3,355,000  [16152-|  3674   14910   16897     201   17606]
+  10         2,410,000  [16152--> 3674 ... ]    G[s][d].lower += 2,410,000
+  11 X       3,000,000  [16152-|  3674 ... ]    G[s][d].upper = min(G[s][d].upper, G[s][d].lower + 3,000,000)
+  12 X       3,354,000  [16152-|  3674 ... ]
+  13 X       3,355,000  [16152-|  3674 ... ]
+
+We have four onions [10, 11, 12, 13] which include the hop (16152, 3674).
+Onion 10 succeeded, while onions 11, 12, and 13 failed.
+For onion 10, we set the lower bound G[s][d].lower to onions[10].amount = 2,410,000.
+For onion 11, we set the upper bound G[s][d].upper to onions[11].amount = 3,000,000.
+For the sucessful onion, we increase the lower bound to 
+What do we know from this result?
+
+For each successful hop, we increase the lower bound by the onion amount.
+
+AFTER setting the lower bounds, we check the failed hops.
+
+The upper bound for each channel is:
+    the smallest onion amount that failed on that channel,
+    plus the lower bound.
+
 """
 
 
-# # Iterate through onions and update channel graph
-# for onion in onions:
-#     # Onion has a failed hop
-#     if (s, d) := (onion.s_fail, onion.s_fail+1):
-#         G[onion.s_fail][onion.s_fail + 1].upper = G
+# TODO: Check bound-update logic below
+# Deduce balance bounds from this iteration's results alone
+lower: dict[int, dict[int, int]] = {}
+upper: dict[int, dict[int, int]] = {}
+
+for onion in onions:
+    for s, d in zip(onion.path, onion.path[1:]):
+        if s not in lower:
+            lower[s] = {d: 0}
+        else:
+            lower[s][d] = 0
+
+        if s not in upper:
+            upper[s] = {d: G[s][d].c}
+        else:
+            upper[s][d] = G[s][d].c
+
+good_onions: list[Onion] = [onion for onion in onions if onion.s_fail_index == -1]
+failed_onions: list[Onion] = [onion for onion in onions if onion.s_fail_index != -1]
+
+for onion in good_onions:
+    for s, d in zip(onion.path, onion.path[1:]):
+        lower[s][d] += onion.amount
+
+for onion in failed_onions:
+    for s, d in zip(
+        onion.path[: onion.s_fail_index], onion.path[1 : onion.s_fail_index]
+    ):
+        lower[s][d] += onion.amount
+
+for onion in failed_onions:
+    s = onion.path[onion.s_fail_index]
+    d = onion.path[onion.s_fail_index + 1]
+    upper[s][d] = min(upper[s][d], lower[s][d] + onion.amount)
 
 
-#     # If onion has a failed hop, update that one first
-#     if onion.failed_hop:
-#     if onion.failed_hop:
-#         assert isinstance(onion.failed_hop, tuple)
-#         failed_hop[0]
-#     # Search onion for failed channel
-#     if onion.failed_hop:
-#         failed_hop[0]
-#     for s, d in zip(onion.path, onion.path[1:]):
-#         if G[s][d].u < onion.amount:
-#             for u, v in zip(onion.path[0 : s - 1], onion.path[1 : d - 1]):
-#                 G[u][v]. = onion.amount
-#                 G[v][u].upper = G[v][u].capacity - onion.amount
-#             G[s][d].upper = onion.amount
-#             G[d][s].lower = G[d][s].capacity - onion.amount
-#             failed_channels.append((s, d))
-#             break
-#     # Decrement channel balances
-#     for s, d in zip(onion.path, onion.path[1:]):
-#         G[s][d].balance -= onion.amount
-#         G[d][s].balance += onion.amount
-#     # Update lower and upper bounds
-#     for s, d in zip(onion.path, onion.path[1:]):
-#         G[s][d].lower = max(G[s][d].lower - onion.amount, 0)
-#         G[s][d].upper = max(G[s][d].upper - onion.amount, 0)
-#         G[d][s].lower = min(G[d][s].lower + onion.amount, G[d][s].capacity)
-#         G[d][s].upper = min(G[d][s].upper + onion.amount, G[d][s].capacity)
+# Update balance bounds where new bounds are stricter than existing
+for s, d_dict in lower.items():
+    for d, lower_bound in d_dict.items():
+        G[s][d].lower = max(G[s][d].lower, lower_bound)
+for s, d_dict in upper.items():
+    for d, upper_bound in d_dict.items():
+        G[s][d].upper = min(G[s][d].upper, upper_bound)
