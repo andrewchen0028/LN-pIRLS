@@ -1,5 +1,4 @@
 import json, time
-from typing import cast
 
 from ortools.graph.python import min_cost_flow  # type: ignore
 
@@ -23,7 +22,7 @@ class Channel:
 
 
 class Onion:
-    def __init__(self, path: list[int], amount: int, s_fail: int | None = None) -> None:
+    def __init__(self, path: list[int], amount: int, s_fail: int) -> None:
         self.path = path
         self.amount = amount
         self.s_fail = s_fail
@@ -71,52 +70,57 @@ def print_flow(start, end, flow) -> None:
     print(f"{'Arcs: ':20}{len(flow):>6}")
 
 
-def print_onions(onions):
+def print_onions(onions: list[Onion]):
     print(f"\n{'HTLC':>4}\t{'Amount (sats)':<14}\t{'Path':^10}")
     for i, onion in enumerate(onions):
-        print(f"{i + 1:>4}\t{onion.amount:>14,}", end="\t[")
+        print(
+            f"{i + 1:>4}{' X' if onion.s_fail != -1 else ''}\t{onion.amount:>14,}",
+            end="\t[",
+        )
         upstream = True
         for orid in onion.path[:-1]:
             print(f"{orid:>5}", end="")
-            # if orid == failed[0]:
-            #     upstream = False
-            #     print(f" X ", end="")
-            # else:
-            if True:
-                print(f"{' - ' if upstream else ' - '}", end="")
+            if orid == onion.s_fail:
+                print(f"-| ", end="")
+                upstream = False
+            else:
+                print(f"{'-->' if upstream else '   '}", end="")
         print(f"{lnid_to_orid[D]}]")
 
 
-def flow_to_onions(flow):
+def flow_to_onions(
+    flow: dict[int, dict[int, int]], balance_graph: dict[int, dict[int, int]]
+):
     onions: list[Onion] = []
     remaining = A
 
+    # Create onions until no more flow remains
     while remaining:
         # Initialize pointers, path, and amount
         curr, next = lnid_to_orid[S], None
         path: list[int] = []
-        amt: int = remaining
+        amt = remaining
         s_fail: int = -1
 
-        # Find path from source to destination
+        # Find path and amount
         while curr != lnid_to_orid[D]:
-            next = sorted(flow[curr].keys())[0]
             path.append(curr)
+            next = sorted(flow[curr].keys())[0]
             amt = min(amt, flow[curr][next])
             curr = next
+        path.append(curr)
 
-        # Update payment flow and check for failure
+        # Decrement remaining payment flow and update balance graph
         for s, d in zip(path, path[1:]):
             flow[s][d] -= amt
+            balance_graph[s][d] -= amt
             if flow[s][d] == 0:
                 del flow[s][d]
-            # if not s_fail and G[s][d].u < amt:
-            #     s_fail = s
-            #     d_fail = d
+            if balance_graph[s][d] < 0 and s_fail == -1:
+                s_fail = s
 
         # Add onion to list
-        path.append(curr)
-        onions.append(Onion(path, amt))
+        onions.append(Onion(path, amt, s_fail))
         remaining -= amt
 
     return onions
@@ -126,7 +130,7 @@ def flow_to_onions(flow):
 A, N, Q = int(100e6), 5, 1000
 S = "03efccf2c383d7bf340da9a3f02e2c23104a0e4fe8ac1a880c8e2dc92fbdacd9df"
 D = "021c97a90a411ff2b10dc2a8e32de2f29d2fa49d41bfbb52bd416e460db0747d0d"
-USE_KNOWN_BALANCES = True
+USE_KNOWN_BALANCES = False
 channels = json.load(open("listchannels20220412_processed.json"))
 
 
@@ -220,12 +224,29 @@ for i in range(mcf.num_arcs()):
             flow[s] = {d: x}
 print_flow(start, end, flow)
 
-
-onions: list[Onion] = flow_to_onions(flow)
+balance_graph = {s: {d: e.u for d, e in channels.items()} for s, channels in G.items()}
+onions: list[Onion] = flow_to_onions(flow, balance_graph)
 print_onions(onions)
 
 
 # TODO: Update bounds for failed, upstream, and successful channels
+# Get failed arcs
+for s, outflows in sorted(flow.items()):
+    for d, f in sorted(outflows.items()):
+        if f > G[s][d].u:
+            G[s][d].upper = f
+
+
+"""
+    Channel               Flow /      Capacity   P_e(x_e)         Fee   Failed?
+(16152,  3674)      12,119,000 /    16,777,215    0.278           16203   [X]
+
+HTLC    Amount (sats)      Path
+  10         2,410,000  [16152--> 3674-->  201-->17606]
+  11 X       3,000,000  [16152-|  3674    3043     201   17606]
+  12 X       3,354,000  [16152-|  3674   10690   11001    3611   17606]
+  13 X       3,355,000  [16152-|  3674   14910   16897     201   17606]
+"""
 
 
 # # Iterate through onions and update channel graph
@@ -262,5 +283,3 @@ print_onions(onions)
 #         G[s][d].upper = max(G[s][d].upper - onion.amount, 0)
 #         G[d][s].lower = min(G[d][s].lower + onion.amount, G[d][s].capacity)
 #         G[d][s].upper = min(G[d][s].upper + onion.amount, G[d][s].capacity)
-
-# Print info
