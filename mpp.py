@@ -1,4 +1,4 @@
-import json, time
+import json, os, time
 
 from ortools.graph.python import min_cost_flow  # type: ignore
 
@@ -17,8 +17,8 @@ class Channel:
         self.u = u
         self.r = r
         self.b = b
-        self.lower = 0
-        self.upper = c
+        self.floor = 0
+        self.ceil = c
 
 
 class Onion:
@@ -26,6 +26,17 @@ class Onion:
         self.path = path
         self.amount = amount
         self.s_fail_index = s_fail_index
+
+    def hops(self) -> list[tuple[int, int]]:
+        return [(s, d) for s, d in zip(self.path, self.path[1:])]
+
+    def upstream_hops(self) -> list[tuple[int, int]]:
+        return self.hops()[: self.s_fail_index]
+
+    def failed_hop(self) -> tuple[int, int]:
+        s = self.path[self.s_fail_index]
+        d = self.path[self.s_fail_index + 1]
+        return s, d
 
 
 def edge_probability(s: int, d: int, x: int) -> float:
@@ -89,6 +100,7 @@ def print_onions(onions: list[Onion]):
             for orid in onion.path[onion.s_fail_index + 1 : -1]:
                 print(f"{orid:>5}", end="   ")
         print(f"{lnid_to_orid[D]}]")
+    print()
 
 
 def flow_to_onions(
@@ -113,14 +125,19 @@ def flow_to_onions(
             curr = next
         path.append(curr)
 
-        # Decrement remaining payment flow and update balance graph
+        # Check for failed hops
+        for i, (s, d) in enumerate(zip(path, path[1:])):
+            if amt > balance_graph[s][d]:
+                s_fail_index = i
+                break
+
+        # Decrement remaining flow and update balance graph if no failed hops
         for i, (s, d) in enumerate(zip(path, path[1:])):
             flow[s][d] -= amt
-            balance_graph[s][d] -= amt
             if flow[s][d] == 0:
                 del flow[s][d]
-            if balance_graph[s][d] < 0 and s_fail_index == -1:
-                s_fail_index = i
+            if s_fail_index == -1:
+                balance_graph[s][d] -= amt
 
         # Add onion to list
         onions.append(Onion(path, amt, s_fail_index))
@@ -130,11 +147,14 @@ def flow_to_onions(
 
 
 # Set parameters
-A, N, Q = int(10e6), 5, 1000
+# Send A=50e6 with USE_KNOWN_BALANCES=False to observe two HTLCs on one channel,
+# one successful and one failed
+A, N, Q = int(40e6), 5, 1000
 S = "03efccf2c383d7bf340da9a3f02e2c23104a0e4fe8ac1a880c8e2dc92fbdacd9df"
 D = "021c97a90a411ff2b10dc2a8e32de2f29d2fa49d41bfbb52bd416e460db0747d0d"
 USE_KNOWN_BALANCES = False
 channels = json.load(open("listchannels20220412_processed.json"))
+os.system("clear")
 
 
 # Check outbound liquidity
@@ -180,18 +200,18 @@ for e in channels:
         G[s][d].b = e["b"]
 
     if USE_KNOWN_BALANCES and e["s"] == S or e["d"] == S:
-        G[s][d].lower = e["u"]
-        G[s][d].upper = e["u"]
+        G[s][d].floor = e["u"]
+        G[s][d].ceil = e["u"]
 
-    # Add zero-cost arc if lower bound is known, then add linearized arcs up to upper bound
-    if G[s][d].lower:
-        arcs.append(Arc(s, d, int(G[s][d].lower / Q), 0))
-    n = min(N, int((G[s][d].upper - G[s][d].lower) / (N * Q)))
+    # Add zero-cost arc if floor is known, then add linearized arcs up to ceil
+    if G[s][d].floor:
+        arcs.append(Arc(s, d, int(G[s][d].floor / Q), 0))
+    n = min(N, int((G[s][d].ceil - G[s][d].floor) / (N * Q)))
     for i in range(n):
         # fmt: off
         # TODO: confirm this cost logic is right; use optimal linearization
-        arcs.append(Arc(s, d, int((G[s][d].upper - G[s][d].lower) / (n * Q)),
-                        (i + 1) * int(cmax / (G[s][d].upper - G[s][d].lower))))
+        arcs.append(Arc(s, d, int((G[s][d].ceil - G[s][d].floor) / (n * Q)),
+                        (i + 1) * int(cmax / (G[s][d].ceil - G[s][d].floor))))
         # arcs.append(Arc(s, d, int(e["c"] / (N * Q)), (i + 1) * int(cmax / e["c"])))
         # fmt: on
 
@@ -234,69 +254,80 @@ print_onions(onions)
 
 """
 HTLC    Amount (sats)      Path
-  10         2,410,000  [16152--> 3674 ... ]    G[s][d].lower += 2,410,000
-  11 X       3,000,000  [16152-|  3674 ... ]    G[s][d].upper = min(G[s][d].upper, G[s][d].lower + 3,000,000)
+  10         2,410,000  [16152--> 3674 ... ]    G[s][d].floor += 2,410,000
+  11 X       3,000,000  [16152-|  3674 ... ]    G[s][d].ceil = min(G[s][d].ceil, G[s][d].floor + 3,000,000)
   12 X       3,354,000  [16152-|  3674 ... ]
   13 X       3,355,000  [16152-|  3674 ... ]
 
 We have four onions [10, 11, 12, 13] which include the hop (16152, 3674).
 Onion 10 succeeded, while onions 11, 12, and 13 failed.
-For onion 10, we set the lower bound G[s][d].lower to onions[10].amount = 2,410,000.
-For onion 11, we set the upper bound G[s][d].upper to onions[11].amount = 3,000,000.
-For the sucessful onion, we increase the lower bound to 
+For onion 10, we set G[s][d].floor to onions[10].amount = 2,410,000.
+For onion 11, we set G[s][d].ceil to onions[11].amount = 3,000,000.
+For the sucessful onion, we increase the floor to 
 What do we know from this result?
 
-For each successful hop, we increase the lower bound by the onion amount.
+For each successful hop, we increase the floor by the onion amount.
 
-AFTER setting the lower bounds, we check the failed hops.
+AFTER setting the floors, we check the failed hops.
 
-The upper bound for each channel is:
+The ceiling for each channel is:
     the smallest onion amount that failed on that channel,
-    plus the lower bound.
+    plus the floor.
 
 """
 
 
 # TODO: Check bound-update logic below
 # Deduce balance bounds from this iteration's results alone
-lower: dict[int, dict[int, int]] = {}
-upper: dict[int, dict[int, int]] = {}
+floors: dict[int, dict[int, int]] = {}
+ceils: dict[int, dict[int, int]] = {}
 
 for onion in onions:
-    for s, d in zip(onion.path, onion.path[1:]):
-        if s not in lower:
-            lower[s] = {d: 0}
+    for s, d in onion.hops():
+        if s not in floors:
+            floors[s] = {d: 0}
         else:
-            lower[s][d] = 0
+            floors[s][d] = 0
 
-        if s not in upper:
-            upper[s] = {d: G[s][d].c}
+        if s not in ceils:
+            ceils[s] = {d: G[s][d].c}
         else:
-            upper[s][d] = G[s][d].c
+            ceils[s][d] = G[s][d].c
 
-good_onions: list[Onion] = [onion for onion in onions if onion.s_fail_index == -1]
-failed_onions: list[Onion] = [onion for onion in onions if onion.s_fail_index != -1]
+for good_onion in [onion for onion in onions if onion.s_fail_index == -1]:
+    for s, d in good_onion.hops():
+        floors[s][d] += good_onion.amount
 
-for onion in good_onions:
-    for s, d in zip(onion.path, onion.path[1:]):
-        lower[s][d] += onion.amount
+for failed_onion in [onion for onion in onions if onion.s_fail_index != -1]:
+    for s, d in failed_onion.upstream_hops():
+        floors[s][d] += failed_onion.amount
 
-for onion in failed_onions:
-    for s, d in zip(
-        onion.path[: onion.s_fail_index], onion.path[1 : onion.s_fail_index]
-    ):
-        lower[s][d] += onion.amount
-
-for onion in failed_onions:
-    s = onion.path[onion.s_fail_index]
-    d = onion.path[onion.s_fail_index + 1]
-    upper[s][d] = min(upper[s][d], lower[s][d] + onion.amount)
+# TODO: Check why some failed hops' ceilings are not being reduced
+for failed_onion in [onion for onion in onions if onion.s_fail_index != -1]:
+    s, d = failed_onion.failed_hop()
+    ceils[s][d] = min(ceils[s][d], floors[s][d] + failed_onion.amount)
+print()
 
 
 # Update balance bounds where new bounds are stricter than existing
-for s, d_dict in lower.items():
-    for d, lower_bound in d_dict.items():
-        G[s][d].lower = max(G[s][d].lower, lower_bound)
-for s, d_dict in upper.items():
-    for d, upper_bound in d_dict.items():
-        G[s][d].upper = min(G[s][d].upper, upper_bound)
+# TODO: Fix floor-update logic (observed instance where floor > u)
+for s, d_dict in floors.items():
+    for d, floor in d_dict.items():
+        if floor > G[s][d].floor:
+            print(
+                f"floor({s:>5}, {d:>5}): {G[s][d].floor:>11,} ->"
+                f" {floor:>11,}\t{'>' if floor >= G[s][d].u else '<'} u ="
+                f" {G[s][d].u:>13,} {'(!)' if floor > G[s][d].u else ''}"
+            )
+        G[s][d].floor = max(G[s][d].floor, floor)
+print()
+
+for s, d_dict in ceils.items():
+    for d, ceil in d_dict.items():
+        if ceil < G[s][d].ceil:
+            print(
+                f"ceil({s:>5}, {d:>5}): {G[s][d].ceil:>11,} ->"
+                f" {ceil:>11,}\t{'<' if ceil <= G[s][d].u else '>'} u ="
+                f" {G[s][d].u:>11,} {'(!)' if ceil < G[s][d].u else ''}"
+            )
+        G[s][d].ceil = min(G[s][d].ceil, ceil)
