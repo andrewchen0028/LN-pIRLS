@@ -1,9 +1,7 @@
-import json
-import random
+import json, random, statistics
 
-# Load channels and drop unnecessary fields
+# Load channels, drop unnecessary fields, and rename fields
 FILE = "listchannels20220412"
-# FILE = "testchannels"
 channels = [
     {
         new_key: channel[old_key]
@@ -18,6 +16,21 @@ channels = [
     for channel in json.load(open(f"{FILE}.json"))["channels"]
 ]
 
+print(f"Channel count: {len(channels)}")
+# Drop channels with ridiculous base fees
+base_fees = [int(e["b"]) for e in channels]
+base_fees.sort()
+base_fee_6sd = int(sum(base_fees) / len(base_fees)) + 6 * int(
+    statistics.stdev(base_fees)
+)
+to_drop = [e for e in channels if e["b"] > base_fee_6sd]
+channels = [e for e in channels if e["b"] < 1e3 * base_fee_6sd]
+print(
+    f"Dropped {len(to_drop)} channels with base fees > 6sd above mean"
+    f" (above {int(base_fee_6sd / 1e3)} sat)"
+)
+
+
 # Assign ground truth balances
 u: dict[tuple[str, str], int] = {}
 for e in channels:
@@ -31,12 +44,3 @@ json.dump(channels, open(f"{FILE}_processed.json", "w"), indent=4)
 
 with open("file.json", "w") as fp:
     fp.write("[" + ",\n".join(json.dumps(i) for i in channels) + "]\n")
-
-# source                    s
-# destination               d
-# capacity                  c
-# balance                   u
-# balance upper bound       umax
-# balance lower bound       umin
-# proportional fee          r
-# base fee                  b
