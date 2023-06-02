@@ -15,9 +15,10 @@ channels = [
     }
     for channel in json.load(open(f"{FILE}.json"))["channels"]
 ]
+channels.sort(key=lambda e: e["s"] + e["d"])
 
-print(f"Channel count: {len(channels)}")
 # Drop channels with ridiculous base fees
+print(f"Channel count: {len(channels)}")
 base_fees = [int(e["b"]) for e in channels]
 base_fees.sort()
 base_fee_6sd = int(sum(base_fees) / len(base_fees)) + 6 * int(
@@ -38,6 +39,20 @@ for e in channels:
         e["u"] = e["c"] - u[(e["d"], e["s"])]
     else:
         e["u"] = u[(e["s"], e["d"])] = random.randint(0, e["c"])
+
+# # Construct LNID set
+# lnids: set[str] = set()
+# for e in channels:
+#     lnids.update([e["s"], e["d"]])
+
+# # Map string LNIDs to integer ORIDs from [0, ..., n]
+# lnid_to_orid: dict[str, int] = {lnid: orid for orid, lnid in enumerate(lnids)}
+# orid_to_lnid: dict[int, str] = {orid: lnid for orid, lnid in enumerate(lnids)}
+
+# # Map channels to integer ORIDs
+# for e in channels:
+#     e["s"] = lnid_to_orid[e["s"]]
+#     e["d"] = lnid_to_orid[e["d"]]
 
 # Save channels
 json.dump(channels, open(f"{FILE}_processed.json", "w"), indent=4)
