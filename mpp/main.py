@@ -82,7 +82,6 @@ def print_onions(onions: list[Onion]):
             for orid in onion.path[onion.s_fail_index + 1 : -1]:
                 print(f"{orid:>5}", end="   ")
         print(f"{lnid_to_orid[D]}]")
-    print()
 
 
 def flow_to_onions(
@@ -128,17 +127,24 @@ def flow_to_onions(
     return onions
 
 
+"""
+TODO: Fix bug where a channel has bounds [L, U] where L = U,
+flow x = L = U, and it gets marked as failed
+"""
+
+
 # Set parameters
 # Send A=50e6 with USE_KNOWN_BALANCES=False to observe two HTLCs on one channel,
 # one successful and one failed
-A, N, Q = int(50e6), 5, 1000
+A = int(float(input("Enter amount to send (in BTC): ")) * 1e8)
+N, Q = 5, 1000
 S = "03efccf2c383d7bf340da9a3f02e2c23104a0e4fe8ac1a880c8e2dc92fbdacd9df"
 D = "021c97a90a411ff2b10dc2a8e32de2f29d2fa49d41bfbb52bd416e460db0747d0d"
+MAX_ATTEMPTS = 10
 USE_KNOWN_BALANCES = False
 channels: list[dict[str, str | int]] = json.load(
     open("listchannels20220412_processed.json")
 )
-os.system("clear")
 
 
 # Check outbound balance
@@ -191,22 +197,24 @@ for e in channels:
         G[s][d].floor = e["u"]
         G[s][d].ceil = e["u"]
 
-for attempt in range(3):
+total_time = 0
+for attempt in range(MAX_ATTEMPTS):
+    os.system("clear")
     print(f"========== Attempt {attempt + 1:>2} ==========")
     arcs: list[Arc] = []
     for s in G.keys():
         for d in G[s].keys():
-            # Add zero-cost arc if floor is known, then add linearized arcs up to ceil
-            if G[s][d].floor:
+            # Add zero-cost arc if floor is known
+            if G[s][d].floor > 0:
                 arcs.append(Arc(s, d, int(G[s][d].floor / Q), 0))
-            n = min(N - 1, int((G[s][d].ceil - G[s][d].floor) / (N * Q)))
-            for i in range(n):
-                # fmt: off
-                # TODO: confirm this cost logic is right; use optimal linearization
-                arcs.append(Arc(s, d, int((G[s][d].ceil - G[s][d].floor) / (n * Q)),
-                                (i + 1) * int(cmax / (G[s][d].ceil - G[s][d].floor))))
-                # arcs.append(Arc(s, d, int(e["c"] / (N * Q)), (i + 1) * int(cmax / e["c"])))
-                # fmt: on
+
+            # Add linearized arcs from floor to ceiling
+            if (r := G[s][d].ceil - G[s][d].floor) > 0:
+                # TODO: use optimal linearization
+                for i in range(N):
+                    c = int(r / (N * Q))
+                    unit_cost = (i + 1) * int(cmax / r)
+                    arcs.append(Arc(s, d, c, unit_cost))
 
     # Invoke solver
     mcf = min_cost_flow.SimpleMinCostFlow()
@@ -220,6 +228,7 @@ for attempt in range(3):
     start = time.time()
     status = mcf.solve()
     end = time.time()
+    total_time += end - start
 
     if status != mcf.OPTIMAL:
         print(f"Error: MCF solver returned status {status}")
@@ -238,8 +247,8 @@ for attempt in range(3):
                 flow[s] = {d: x}
     print_flow(end - start, flow)
     if check_flow(flow):
-        print("Payment successful!")
-        break
+        print(f"Payment completed in {total_time:>5.3} seconds")
+        exit(0)
 
     balance_graph = {
         s: {d: e.u for d, e in channels.items()} for s, channels in G.items()
@@ -279,7 +288,7 @@ for attempt in range(3):
     print()
 
     # Update balance bounds where new bounds are stricter than existing
-    # TODO: Fix floor-update logic (observed instance where floor > u)
+    # TODO: Fix floor-update logic (large payments often have floor > u)
     for s, d_dict in floors.items():
         for d, floor in d_dict.items():
             if floor > G[s][d].floor:
@@ -300,4 +309,5 @@ for attempt in range(3):
                     f" {G[s][d].u:>11,} {'(!)' if ceil < G[s][d].u else ''}"
                 )
             G[s][d].ceil = min(G[s][d].ceil, ceil)
-    print()
+    input("Press Enter to continue...")
+print(f"Payment failed after {total_time:>5.3} seconds")
