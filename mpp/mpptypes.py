@@ -26,7 +26,7 @@ class Channel:
 
 
 class Onion:
-    # TODO: failure_source_index == -1 to indicate success is messy
+    # FIXME: failure_source_index == -1 to indicate success is messy
     def __init__(self, path: list[int], amount: int, failure_source_index: int) -> None:
         self.path = path
         self.amount = amount
@@ -66,6 +66,7 @@ class LNGraph:
         self.S = S
         self.D = D
         self.A = A
+        self.R = A
         self.use_known = use_known
         self.cmax = 0
         self.time = 0
@@ -102,26 +103,22 @@ class LNGraph:
         return self.edges[s][d].b / 1e3 + x * self.edges[s][d].r / 1e6
 
     def linearize(self, N: int, Q: int) -> list[Arc]:
+        # Add linearized arcs up to upper bound
         arcs: list[Arc] = []
-        free: list[Arc] = []
-
         for s in self.edges:
-            for d in self.edges[s]:
-                # Add zero-cost arc if lower bound is known
-                if (lower := self.edges[s][d].lower) > 0:
-                    free.append(Arc(s, d, int(lower / Q), 0))
-
-                # Add linearized arcs up to upper bound
-                if (r := (self.edges[s][d].upper - self.edges[s][d].lower)) > 0:
+            for d, edge in self.edges[s].items():
+                if self.use_known and (s == self.S or d == self.S):
+                    arcs.append(Arc(s, d, int(edge.u / Q), 0))
+                else:
                     for i in range(N):
-                        c = int(r / (N * Q))
-                        unit_cost = (i + 1) * int(self.cmax / r)
+                        c = int((edge.upper - edge.lower) / (N * Q))
+                        unit_cost = (i + 1) * int(self.cmax / (edge.upper - edge.lower))
                         arcs.append(Arc(s, d, c, unit_cost))
 
-        print(f"Linearized into {len(free)} free and {len(arcs)} quadratic arcs\n")
-        return free + arcs
+        print(f"Linearized into {len(arcs)} arcs\n")
+        return arcs
 
-    def solve_mcf(self, arcs: list[Arc], A: int, Q: int) -> dict[int, dict[int, int]]:
+    def solve_mcf(self, arcs: list[Arc], Q: int) -> dict[int, dict[int, int]]:
         # Initialize MCF solver
         mcf = min_cost_flow.SimpleMinCostFlow()
         for arc in arcs:
@@ -130,8 +127,8 @@ class LNGraph:
             mcf.set_node_supply(s, 0)
             for d in self.edges[s]:
                 mcf.set_node_supply(d, 0)
-        mcf.set_node_supply(self.S, int(A / Q))
-        mcf.set_node_supply(self.D, -int(A / Q))
+        mcf.set_node_supply(self.S, int(self.R / Q))
+        mcf.set_node_supply(self.D, -int(self.R / Q))
 
         # Solve MCF and update total time
         start = time.time()
@@ -205,46 +202,65 @@ class LNGraph:
             onions.append(Onion(path, onion_amount, failure_source_index))
             amount -= onion_amount
 
+        print(f"Broke flow into payment with {len(onions)} onions\n")
         return Payment(onions)
 
-    # FIXME: Check why (4872, 18227) lower bound gets set higher than balance
     def update_bounds(self, payment: Payment) -> None:
-        # Initialize lower and upper bounds from this payment alone
-        bounds: dict[int, dict[int, list[int]]] = {}
-        for onion in payment.onions:
-            for s, d in onion.hops():
-                bounds[s] = {d: [0, self.edges[s][d].c], **bounds.get(s, {})}
-
-        # First, raise lower bounds on good onions
+        # For good onions, reduce lower and upper bounds of each hop by onion amount
         for onion in payment.good_onions():
             for s, d in onion.hops():
-                bounds[s][d][0] += onion.amount
+                sd = self.edges[s][d]
+                self.edges[s][d].lower = max(sd.lower - onion.amount, 0)
+                self.edges[s][d].upper -= onion.amount
+                self.edges[s][d].u -= onion.amount
 
-        # Next, raise lower bounds on upstream hops
+                assert 0 <= sd.lower
+
+                assert sd.lower <= sd.u
+
+                # FIXME: This fails after several attempts.
+                # Both upper and lower have warnings.
+                # Only happens when `use_known` is False.
+                assert sd.u <= sd.upper
+
+                assert sd.upper <= sd.c
+
+                ds = self.edges[d][s]
+                self.edges[d][s].lower += onion.amount
+                self.edges[d][s].upper = min(ds.upper + onion.amount, ds.c)
+                self.edges[d][s].u += onion.amount
+
+                assert 0 <= ds.lower <= ds.u <= ds.upper <= ds.c
+
+        # NOTE: Something is wrong with these lines
+        # Initialize bounds_delta lists
+        bounds_delta: dict[int, dict[int, list[int]]] = {}
+        for onion in payment.bad_onions():
+            for s, d in onion.upstream_hops() + [onion.failed_hop]:
+                bounds_delta[s] = {d: [0, 0], **bounds_delta.get(s, {})}
+
+        # Record largest upstream and failed amounts for each hop
         for onion in payment.bad_onions():
             for s, d in onion.upstream_hops():
-                bounds[s][d][0] += onion.amount
-
-        # Finally, reduce upper bounds on bad hops
-        # Upper bound is the lower bound plus the smallest amount that failed
-        for onion in payment.bad_onions():
+                bounds_delta[s][d][0] = max(bounds_delta[s][d][0], onion.amount)
             s, d = onion.failed_hop
-            bounds[s][d][1] = min(bounds[s][d][1], bounds[s][d][0] + onion.amount)
+            bounds_delta[s][d][1] = max(bounds_delta[s][d][1], onion.amount)
 
         # Update edge bounds, skipping known balances if available
         # Note, known balances should have been assigned in `self.__init__()`
-        for s in bounds:
-            for d in bounds[s]:
-                current = self.edges[s][d]
+        for s in bounds_delta:
+            for d in bounds_delta[s]:
                 if not self.use_known or (s != self.S and d != self.S):
-                    self.edges[s][d].lower = max(current.lower, bounds[s][d][0])
-                    self.edges[s][d].upper = min(current.upper, bounds[s][d][1])
+                    self.edges[s][d].lower += bounds_delta[s][d][0]
+                    self.edges[s][d].upper -= bounds_delta[s][d][1]
+                    self.edges[d][s].lower = self.edges[d][s].c - self.edges[s][d].upper
+                    self.edges[d][s].upper = self.edges[d][s].c - self.edges[s][d].lower
 
-        # NOTE: (4872, 18227) has two good onions and two where
-        #           the channel is upstream of a failed hop.
-        #       The lower bound is computed and updated correctly;
-        #           at least one of the onions *should* have failed.
-        #       Check the logic in `flow_to_payment()`.
+        # Update payment amount
+        a = sum(o.amount for o in payment.good_onions())
+        self.R -= a
+        print(f"Sent {a:<,} sats;", end=" ")
+        print(f"{int(self.R):<,} ({100 * self.R / self.A:5.3f} %) remaining")
 
     def check_bounds(self) -> None:
         # Warn if any edge has balance out of bounds
@@ -254,9 +270,11 @@ class LNGraph:
                 if edge.u < edge.lower:
                     print(f"WARNING: ({s:>5}, {d:>5}) has u < lower", end="\t")
                     print(f"({edge.u:>13,} < {edge.lower:>13,})")
+                    flag = True
                 if edge.upper < edge.u:
                     print(f"WARNING: ({s:>5}, {d:>5}) has upper < u", end="\t")
                     print(f"({edge.upper:>13,} < {edge.u:>13,})")
+                    flag = True
 
         if not flag:
             print("Balance bounds check passed")
