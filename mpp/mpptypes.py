@@ -1,5 +1,9 @@
 import json
+import pickle
 import time
+
+from json import load
+from random import randint
 
 from ortools.graph.python import min_cost_flow  # type: ignore
 
@@ -13,15 +17,7 @@ class Arc:
 
 
 class Channel:
-    def __init__(
-        self,
-        c: int = 0,
-        u: int = 0,
-        r: int = 0,
-        b: int = 0,
-        lower: int = 0,
-        upper: int = 0,
-    ) -> None:
+    def __init__(self, c: int, u: int, r: int, b: int, lower: int, upper: int) -> None:
         self.c = c
         self.u = u
         self.r = r
@@ -60,59 +56,30 @@ class Payment:
 
 
 class LNGraph:
-    def __init__(self, channels: str, s: int, d: int, A: int, use_known: bool) -> None:
-        # Read channels, get max channel capacity, and initialize time
-        channels: list[dict[str, int]] = json.load(open(channels, "r"))
-        self.s = s
-        self.d = d
+    def __init__(self, S: int, D: int, A: int, use_known: bool) -> None:
+        # Initialize attributes and read channels
+        self.S = S
+        self.D = D
         self.A = A
-        self.cmax = max([e["c"] for e in channels])
+        self.cmax = 0
         self.time = 0
         self.use_known = use_known
+        self.edges: dict[int, dict[int, Channel]] = pickle.load(
+            open("channels_pickled.pickle", "rb")
+        )
 
-        # Get ID set
-        ids: set[int] = set()
-        for e in channels:
-            ids.update([e["s"], e["d"]])
+        for s in self.edges:
+            for d, edge in self.edges[s].items():
+                self.cmax = max(self.cmax, edge.c)
 
-        # Initialize edges
-        self.edges: dict[int, dict[int, Channel]] = {id: {} for id in ids}
-        for e in channels:
-            self.edges[e["s"]][e["d"]] = Channel()
-
-        # Assign edge attributes
-        for e in channels:
-            # Get source and destination IDs
-            s = e["s"]
-            d = e["d"]
-            known = self.use_known and (s == self.s or d == self.s)
-
-            # Combine capacities, balances, and fees for parallel channels
-            # FIXME: Uses max fee rate/base instead of distinct edges
-            self.edges[s][d].c += e["c"]
-            self.edges[s][d].u += e["u"]
-
-            ##############################################################
-            # FIXME (urgent): Why do some channels have negative balances?
-            ##############################################################
-            if self.edges[s][d].u < 0:
-                print(f"DEBUG: __init__() assigned self.edges[s][d].u += e['u'].")
-                print(f"\tself.edges[s][d].u = {self.edges[s][d].u}")
-                print()
-            ##############################################################
-            # FIXME (urgent): Why do some channels have negative balances?
-            ##############################################################
-
-            self.edges[s][d].r = max(self.edges[s][d].r, e["r"])
-            self.edges[s][d].b = max(self.edges[s][d].b, e["b"])
-
-            # Set lower and upper bounds, using known balances if available
-            self.edges[s][d].lower = e["u"] if known else 0
-            self.edges[s][d].upper = e["u"] if known else e["c"]
+                # Set lower and upper bounds, using known balances if available
+                known = self.use_known and (s == self.S or d == self.S)
+                edge.lower = edge.u if known else 0
+                edge.upper = edge.u if known else edge.c
 
     def edge_probability(self, s: int, d: int, x: int) -> float:
         edge = self.edges[s][d]
-        if self.use_known and (s == self.s or d == self.s):
+        if self.use_known and (s == self.S or d == self.S):
             return x <= edge.u
         elif x < edge.lower:
             return 1
@@ -126,8 +93,8 @@ class LNGraph:
 
     def linearize(self, N: int, Q: int) -> list[Arc]:
         arcs: list[Arc] = []
-        for s in self.edges.keys():
-            for d in self.edges[s].keys():
+        for s in self.edges:
+            for d in self.edges[s]:
                 # Add zero-cost arc if lower bound is known
                 if (lower := self.edges[s][d].lower) > 0:
                     arcs.append(Arc(s, d, int(lower / Q), 0))
@@ -140,19 +107,17 @@ class LNGraph:
                         arcs.append(Arc(s, d, c, unit_cost))
         return arcs
 
-    def solve_mcf(self, arcs: list[Arc], A: int, Q: int):
+    def solve_mcf(self, arcs: list[Arc], A: int, Q: int) -> dict[int, dict[int, int]]:
         # Initialize MCF solver
         mcf = min_cost_flow.SimpleMinCostFlow()
         for arc in arcs:
-            # print(
-            #     f"Adding arc ({arc.s:>5}, {arc.d:>5}) with cost {arc.unit_cost:>6} and"
-            #     f" capacity {arc.c:>6}"
-            # )
             mcf.add_arc_with_capacity_and_unit_cost(arc.s, arc.d, arc.c, arc.unit_cost)
-        for s in self.edges.keys():
+        for s in self.edges:
             mcf.set_node_supply(s, 0)
-        mcf.set_node_supply(self.s, int(A / Q))
-        mcf.set_node_supply(self.d, -int(A / Q))
+        mcf.set_node_supply(self.S, int(A / Q))
+        mcf.set_node_supply(self.D, -int(A / Q))
+
+        # FIXME: MCF coming out with zero flow on all arcs
 
         # Solve MCF and update total time
         start = time.time()
@@ -166,8 +131,11 @@ class LNGraph:
 
         # Collect linearized arcs into payment flow
         flow: dict[int, dict[int, int]] = {}
+        print(mcf.num_arcs())
+        count = 0
         for i in range(mcf.num_arcs()):
             if mcf.flow(i):
+                count += 1
                 s: int = mcf.tail(i)
                 d: int = mcf.head(i)
                 x: int = mcf.flow(i) * Q
@@ -175,6 +143,8 @@ class LNGraph:
                     flow[s] = {d: x}
                 else:
                     flow[s][d] = flow[s].get(d, 0) + x
+        print(f"count: {count}")
+        print(f"flow: {flow}")
 
         # Print results
         print(
@@ -212,7 +182,10 @@ class LNGraph:
 
     def flow_to_payment(self, flow: dict[int, dict[int, int]]) -> Payment:
         # Initialize payment amount, onion list, and residual graph
-        amount = sum(flow[self.s].values())
+        print(self.S)
+        print(self.S in flow)
+        print(json.dumps(flow[self.S], indent=4))
+        amount = sum(flow[self.S].values())
         onions: list[Onion] = []
         residual_graph: dict[int, dict[int, int]] = {
             s: {d: self.edges[s][d].u for d in self.edges[s]} for s in self.edges
@@ -221,13 +194,13 @@ class LNGraph:
         # Create onions until no more flow remains
         while amount > 0:
             # Initialize pointers, path, and onion amount
-            curr: int = self.s
+            curr: int = self.S
             path: list[int] = [curr]
             onion_amount: int = amount
             failure_source_index: int = -1
 
             # Find path and amount
-            while curr != self.d:
+            while curr != self.D:
                 next = sorted(flow[curr].keys())[0]
                 path.append(next)
                 onion_amount = min(onion_amount, flow[curr][next])
@@ -302,7 +275,7 @@ class LNGraph:
         for s in bounds:
             for d in bounds[s]:
                 current = self.edges[s][d]
-                if not self.use_known or (s != self.s and d != self.s):
+                if not self.use_known or (s != self.S and d != self.S):
                     self.edges[s][d].lower = max(current.lower, bounds[s][d][0])
                     self.edges[s][d].upper = min(current.upper, bounds[s][d][1])
 

@@ -3,3 +3,6 @@
 .vscode
 
 graveyard
+
+commit.txt
+channels_processed.pkl
