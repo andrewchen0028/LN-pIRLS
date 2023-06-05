@@ -2,10 +2,10 @@ from mpp.mpptypes import LNGraph
 
 
 # Set parameters
-A = 0.25e8
+A = 1.37e8
 N = 5
 Q = 1000
-MAX_ATTEMPTS = 6
+MAX_ATTEMPTS = 1
 USE_KNOWN_BALANCES = False
 
 
@@ -23,11 +23,18 @@ for attempt in range(MAX_ATTEMPTS):
     print(f"\033[4m Attempt {attempt + 1:>2}/{MAX_ATTEMPTS:>2} \033[0m")
 
     arcs = G.linearize(N, Q)
-    flow = G.solve_mcf(arcs, A, Q)
-    onions = G.flow_to_payment(flow)
 
-    if not onions.bad_onions():
+    flow = G.solve_mcf(arcs, A, Q)
+    G.print_flow(flow)
+
+    payment = G.flow_to_payment(flow)
+    G.print_payment(payment)
+
+    if not payment.bad_onions():
         print(f"Payment completed in {G.time:>.3f} seconds")
         exit(0)
 
-    G.update_bounds(onions)
+    G.update_bounds(payment)
+    G.check_bounds()
+
+print(f"Payment failed after {MAX_ATTEMPTS} attempts")

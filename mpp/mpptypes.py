@@ -159,10 +159,11 @@ class LNGraph:
             f"Solver finished in {end - start:4.3f} seconds\n"
             f"Minimum generalized quadratic cost: {mcf.optimal_cost():,}\n"
         )
-        self.print_flow(flow)
 
         return flow
 
+    # FIXME: Check the logic here. We are passing hops over one channel
+    #       with aggregate amount greater than the channel balance.
     def flow_to_payment(self, flow: dict[int, dict[int, int]]) -> Payment:
         # Initialize payment amount, onion list, and residual graph
         amount = sum(flow[self.S].values())
@@ -204,15 +205,15 @@ class LNGraph:
             onions.append(Onion(path, onion_amount, failure_source_index))
             amount -= onion_amount
 
-        self.print_payment(payment := Payment(onions))
-        return payment
+        return Payment(onions)
 
+    # FIXME: Check why (4872, 18227) lower bound gets set higher than balance
     def update_bounds(self, payment: Payment) -> None:
         # Initialize lower and upper bounds from this payment alone
         bounds: dict[int, dict[int, list[int]]] = {}
         for onion in payment.onions:
             for s, d in onion.hops():
-                bounds[s] = {**bounds.get(s, {}), d: [0, self.edges[s][d].c]}
+                bounds[s] = {d: [0, self.edges[s][d].c], **bounds.get(s, {})}
 
         # First, raise lower bounds on good onions
         for onion in payment.good_onions():
@@ -239,9 +240,11 @@ class LNGraph:
                     self.edges[s][d].lower = max(current.lower, bounds[s][d][0])
                     self.edges[s][d].upper = min(current.upper, bounds[s][d][1])
 
-        # Check bounds
-        print("Updated bounds")
-        self.check_bounds()
+        # NOTE: (4872, 18227) has two good onions and two where
+        #           the channel is upstream of a failed hop.
+        #       The lower bound is computed and updated correctly;
+        #           at least one of the onions *should* have failed.
+        #       Check the logic in `flow_to_payment()`.
 
     def check_bounds(self) -> None:
         # Warn if any edge has balance out of bounds
@@ -308,7 +311,8 @@ class LNGraph:
                 print(
                     f"({s:>5}, {d:>5})"
                     f"{'':4}{x:>13,} / {self.edges[s][d].c:>13,}"
-                    f"{'':4}[{self.edges[s][d].lower:>13,}  {self.edges[s][d].upper:>13,}]"
+                    f"{'':4}[{self.edges[s][d].lower:>13,} "
+                    f" {self.edges[s][d].upper:>13,}]"
                     f"{'':4}{p_e:^8.3f}"
                     f"{'':4}{f_e:>13.3f}"
                     f"{'':4}{'[X]' if x > self.edges[s][d].u else '[ ]'}"
