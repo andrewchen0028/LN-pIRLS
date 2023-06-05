@@ -97,11 +97,13 @@ class LNGraph:
 
     def linearize(self, N: int, Q: int) -> list[Arc]:
         arcs: list[Arc] = []
+        free: list[Arc] = []
+
         for s in self.edges:
             for d in self.edges[s]:
                 # Add zero-cost arc if lower bound is known
                 if (lower := self.edges[s][d].lower) > 0:
-                    arcs.append(Arc(s, d, int(lower / Q), 0))
+                    free.append(Arc(s, d, int(lower / Q), 0))
 
                 # Add linearized arcs up to upper bound
                 if (r := (self.edges[s][d].upper - self.edges[s][d].lower)) > 0:
@@ -109,7 +111,9 @@ class LNGraph:
                         c = int(r / (N * Q))
                         unit_cost = (i + 1) * int(self.cmax / r)
                         arcs.append(Arc(s, d, c, unit_cost))
-        return arcs
+
+        print(f"Linearized into {len(free)} free and {len(arcs)} quadratic arcs\n")
+        return free + arcs
 
     def solve_mcf(self, arcs: list[Arc], A: int, Q: int) -> dict[int, dict[int, int]]:
         # Initialize MCF solver
@@ -118,10 +122,10 @@ class LNGraph:
             mcf.add_arc_with_capacity_and_unit_cost(arc.s, arc.d, arc.c, arc.unit_cost)
         for s in self.edges:
             mcf.set_node_supply(s, 0)
+            for d in self.edges[s]:
+                mcf.set_node_supply(d, 0)
         mcf.set_node_supply(self.S, int(A / Q))
         mcf.set_node_supply(self.D, -int(A / Q))
-
-        # FIXME: MCF coming out with zero flow on all arcs
 
         # Solve MCF and update total time
         start = time.time()
@@ -135,11 +139,8 @@ class LNGraph:
 
         # Collect linearized arcs into payment flow
         flow: dict[int, dict[int, int]] = {}
-        print(mcf.num_arcs())
-        count = 0
         for i in range(mcf.num_arcs()):
             if mcf.flow(i):
-                count += 1
                 s: int = mcf.tail(i)
                 d: int = mcf.head(i)
                 x: int = mcf.flow(i) * Q
@@ -147,40 +148,12 @@ class LNGraph:
                     flow[s] = {d: x}
                 else:
                     flow[s][d] = flow[s].get(d, 0) + x
-        print(f"count: {count}")
-        print(f"flow: {flow}")
 
-        # Print results
         print(
-            f"{'Channel':^14}"
-            f"{'':4}{'Flow':>13} / {'Capacity':>13}"
-            f"{'':4}{'Bounds':^29}"
-            f"{'':4}{'P_e(x_e)':^8}"
-            f"{'':4}{'Fee':^13}"
-            f"{'':4}{'Failed?':^7}"
+            f"Solver finished in {end - start:4.3f} seconds\n"
+            f"Minimum generalized quadratic cost: {mcf.optimal_cost():,}\n"
         )
-
-        total_probability = 1
-        total_fee_in_sats = 0
-        for s, outflows in sorted(flow.items()):
-            for d, x in sorted(outflows.items()):
-                total_probability *= (p_e := self.edge_probability(s, d, x))
-                total_fee_in_sats += (f_e := self.edge_fee_in_sats(s, d, x))
-                print(
-                    f"({s:>5}, {d:>5})"
-                    f"{'':4}{x:>13,} / {self.edges[s][d].c:>13,}"
-                    f"{'':4}[{self.edges[s][d].lower:>13,} {self.edges[s][d].upper:>13,}]"
-                    f"{'':4}{p_e:^8.3f}"
-                    f"{'':4}{f_e:>13.3f}"
-                    f"{'':4}{'[X]' if x > self.edges[s][d].u else '[ ]'}"
-                )
-        print()
-
-        # Update latest solver results
-        self.latest_time = end - start
-        self.latest_cost = mcf.optimal_cost()
-        self.latest_probability = total_probability
-        self.latest_fee_in_sats = total_fee_in_sats
+        self.print_flow(flow)
 
         return flow
 
@@ -324,14 +297,37 @@ class LNGraph:
             print(f"WARNING: Source outbound capacity < payment amount")
         if c_d_in_total < self.A:
             print(f"WARNING: Destination inbound capacity < payment amount")
+        print()
 
-    def print_latest(self) -> None:
+    def print_flow(self, flow: dict[int, dict[int, int]]) -> None:
+        # Print results
         print(
-            f"Solver finished in {self.latest_time:4.3f} seconds\n"
-            f"Minimum generalized quadratic cost: {self.latest_cost:,}\n"
-            f"Total probability:\t{100 * self.latest_probability:5.3f} %\n"
-            f"Total fee in sats:\t{int(self.latest_fee_in_sats):7,}\n"
-            f"Effective fee rate:\t{100 * self.latest_fee_in_sats / self.A:6.3f} %\n"
+            f"{'Channel':^14}"
+            f"{'':4}{'Flow':>13} / {'Capacity':>13}"
+            f"{'':4}{'Bounds':^29}"
+            f"{'':4}{'P_e(x_e)':^8}"
+            f"{'':4}{'Fee':^13}"
+            f"{'':4}{'Failed?':^7}"
         )
 
-    # Check if payment was successful
+        total_probability = 1
+        total_fee_in_sats = 0
+        for s, outflows in sorted(flow.items()):
+            for d, x in sorted(outflows.items()):
+                total_probability *= (p_e := self.edge_probability(s, d, x))
+                total_fee_in_sats += (f_e := self.edge_fee_in_sats(s, d, x))
+                print(
+                    f"({s:>5}, {d:>5})"
+                    f"{'':4}{x:>13,} / {self.edges[s][d].c:>13,}"
+                    f"{'':4}[{self.edges[s][d].lower:>13,} {self.edges[s][d].upper:>13,}]"
+                    f"{'':4}{p_e:^8.3f}"
+                    f"{'':4}{f_e:>13.3f}"
+                    f"{'':4}{'[X]' if x > self.edges[s][d].u else '[ ]'}"
+                )
+        print()
+
+        print(
+            f"Total fee:          {int(total_fee_in_sats):7,} sats\n"
+            f"Effective fee rate: {100 * total_fee_in_sats / self.A:7.3f} %\n"
+            f"Total probability:  {100 * total_probability:7.3f} %\n"
+        )

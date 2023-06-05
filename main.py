@@ -4,19 +4,20 @@ from mpp.mpptypes import LNGraph
 
 
 # Set parameters
-A = 0.5
+A = 0.5e8
 N = 5
 Q = 1000
 MAX_ATTEMPTS = 6
-USE_KNOWN_BALANCES = True
+USE_KNOWN_BALANCES = False
 
 # TODO: Finish up debugging
 
 # Initialize graph
 # NOTE: S and D must be up to date with channels_processed.pkl
 #       (see preprocessing.py)
-S = 16284
-D = 17450
+# TODO: Make this so that you don't have to update (S, D) every time
+S = 4872
+D = 16154
 G = LNGraph(S, D, A, USE_KNOWN_BALANCES)
 
 arcs = G.linearize(N, Q)
