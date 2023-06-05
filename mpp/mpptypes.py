@@ -1,8 +1,7 @@
 import json
-import pickle
 import time
 
-from json import load
+from pickle import load
 from random import randint
 
 from ortools.graph.python import min_cost_flow  # type: ignore
@@ -57,17 +56,18 @@ class Payment:
 
 class LNGraph:
     def __init__(self, S: int, D: int, A: int, use_known: bool) -> None:
-        # Initialize attributes and read channels
+        # Initialize attributes
         self.S = S
         self.D = D
         self.A = A
+        self.use_known = use_known
         self.cmax = 0
         self.time = 0
-        self.use_known = use_known
-        self.edges: dict[int, dict[int, Channel]] = pickle.load(
-            open("channels_pickled.pickle", "rb")
-        )
 
+        # Read channels from file and set maximum capacity
+        self.edges: dict[int, dict[int, Channel]] = load(
+            open("channels_processed.pkl", "rb")
+        )
         for s in self.edges:
             for d, edge in self.edges[s].items():
                 self.cmax = max(self.cmax, edge.c)
@@ -76,6 +76,10 @@ class LNGraph:
                 known = self.use_known and (s == self.S or d == self.S)
                 edge.lower = edge.u if known else 0
                 edge.upper = edge.u if known else edge.c
+
+        # Run checks
+        self.check_bounds()
+        self.check_feasibility()
 
     def edge_probability(self, s: int, d: int, x: int) -> float:
         edge = self.edges[s][d]
@@ -280,27 +284,46 @@ class LNGraph:
                     self.edges[s][d].upper = min(current.upper, bounds[s][d][1])
 
     def check_bounds(self) -> None:
+        # Warn if any edge has balance out of bounds
+        flag = False
         for s in self.edges:
-            for d in self.edges[s]:
-                if self.edges[s][d].u < 0:
-                    print(self.edges[s][d].u)
-                # u = self.edges[s][d].u
-                # lower = self.edges[s][d].lower
-                # if u < lower:
-                #     print(
-                #         f"WARNING: ({s:>5} --> {d:>5}) has u < lower\t"
-                #         f"({u:>13,} < {lower:>13,})"
-                #     )
-        # for s in self.edges:
-        #     for d in self.edges[s]:
-        #         u = self.edges[s][d].u
-        #         upper = self.edges[s][d].upper
-        #         if (upper := self.edges[s][d].upper) < (u := self.edges[s][d].u):
-        #             print(
-        #                 f"WARNING: ({s:>5} --> {d:>5}) has upper < u\t"
-        #                 f"({upper:>13,} < {u:>13,})"
-        #             )
+            for d, edge in self.edges[s].items():
+                if edge.u < edge.lower:
+                    print(f"WARNING: ({s:>5}, {d:>5}) has u < lower", end="\t")
+                    print(f"({edge.u:>13,} < {edge.lower:>13,})")
+                if edge.upper < edge.u:
+                    print(f"WARNING: ({s:>5}, {d:>5}) has upper < u", end="\t")
+                    print(f"({edge.upper:>13,} < {edge.u:>13,})")
+
+        if not flag:
+            print("Balance bounds check passed")
         print()
+
+    def check_feasibility(self) -> None:
+        # Check total outbound balance & capacity of source node
+        s_out_edges = (edges := self.edges)[self.S]
+        u_s_out_total = sum(s_out_edges[d].u for d in s_out_edges)
+        c_s_out_total = sum(s_out_edges[d].c for d in s_out_edges)
+
+        # Check total inbound balance & capacity of destination node
+        d_in_edges = list(edges[s][self.D] for s in edges if self.D in edges[s])
+        u_d_in_total = sum(edge.u for edge in d_in_edges)
+        c_d_in_total = sum(edge.c for edge in d_in_edges)
+
+        # Print total balances & capacities; warn if not feasible
+        print(f"Source outbound balance / capacity:", end=f"{'':5}")
+        print(f"{u_s_out_total:>13,} / {c_s_out_total:>13,}")
+        print(f"Destination inbound balance / capacity:", end=" ")
+        print(f"{u_d_in_total:>13,} / {c_d_in_total:>13,}")
+
+        if u_s_out_total < self.A:
+            print(f"WARNING: Source outbound balance < payment amount")
+        if u_d_in_total < self.A:
+            print(f"WARNING: Desination inbound balance < payment amount")
+        if c_s_out_total < self.A:
+            print(f"WARNING: Source outbound capacity < payment amount")
+        if c_d_in_total < self.A:
+            print(f"WARNING: Destination inbound capacity < payment amount")
 
     def print_latest(self) -> None:
         print(
