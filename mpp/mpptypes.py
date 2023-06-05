@@ -42,6 +42,12 @@ class Onion:
         else:
             return self.hops()[: self.failure_source_index]
 
+    def downstream_hops(self) -> list[tuple[int, int]]:
+        if self.failure_source_index == -1:
+            return []
+        else:
+            return self.hops()[self.failure_source_index :]
+
 
 class Payment:
     def __init__(self, onions: list[Onion]) -> None:
@@ -159,9 +165,6 @@ class LNGraph:
 
     def flow_to_payment(self, flow: dict[int, dict[int, int]]) -> Payment:
         # Initialize payment amount, onion list, and residual graph
-        print(self.S)
-        print(self.S in flow)
-        print(json.dumps(flow[self.S], indent=4))
         amount = sum(flow[self.S].values())
         onions: list[Onion] = []
         residual_graph: dict[int, dict[int, int]] = {
@@ -201,28 +204,8 @@ class LNGraph:
             onions.append(Onion(path, onion_amount, failure_source_index))
             amount -= onion_amount
 
-        # Print results
-        print(
-            f"{'Onion':>5}{'':4}{'Amount':>13}{'':4}"
-            f"{'Failed Hop':^14}{'':4}{'Path':^29}"
-        )
-        for i, onion in enumerate(onions):
-            print(f"{i:>5}{'':4}{onion.amount:>13,}{'':4}", end="")
-            if onion.failure_source_index == -1:
-                print(f"{'':14}{'':4}", end="[")
-                for s in onion.path[:-1]:
-                    print(f"{s:>5}", end=" --> ")
-            else:
-                s, d = onion.failed_hop
-                print(f"({s:>5}, {d:>5}){'':4}", end="[")
-                for s in onion.path[: onion.failure_source_index]:
-                    print(f"{s:>5}", end=" --> ")
-                for s in onion.path[onion.failure_source_index + 1 : -1]:
-                    print(f"{s:>5}", end="     ")
-            print(f"{onion.path[-1]:>5}]")
-        print()
-
-        return Payment(onions)
+        self.print_payment(payment := Payment(onions))
+        return payment
 
     def update_bounds(self, payment: Payment) -> None:
         # Initialize lower and upper bounds from this payment alone
@@ -255,6 +238,10 @@ class LNGraph:
                 if not self.use_known or (s != self.S and d != self.S):
                     self.edges[s][d].lower = max(current.lower, bounds[s][d][0])
                     self.edges[s][d].upper = min(current.upper, bounds[s][d][1])
+
+        # Check bounds
+        print("Updated bounds")
+        self.check_bounds()
 
     def check_bounds(self) -> None:
         # Warn if any edge has balance out of bounds
@@ -299,12 +286,14 @@ class LNGraph:
             print(f"WARNING: Destination inbound capacity < payment amount")
         print()
 
+    # FIXME: (14755, 18331) is marked as failed by `print_flow()`,
+    #        but it's downstream according to `print_payment()`
     def print_flow(self, flow: dict[int, dict[int, int]]) -> None:
         # Print results
         print(
             f"{'Channel':^14}"
             f"{'':4}{'Flow':>13} / {'Capacity':>13}"
-            f"{'':4}{'Bounds':^29}"
+            f"{'':4}{'Bounds':^30}"
             f"{'':4}{'P_e(x_e)':^8}"
             f"{'':4}{'Fee':^13}"
             f"{'':4}{'Failed?':^7}"
@@ -319,7 +308,7 @@ class LNGraph:
                 print(
                     f"({s:>5}, {d:>5})"
                     f"{'':4}{x:>13,} / {self.edges[s][d].c:>13,}"
-                    f"{'':4}[{self.edges[s][d].lower:>13,} {self.edges[s][d].upper:>13,}]"
+                    f"{'':4}[{self.edges[s][d].lower:>13,}  {self.edges[s][d].upper:>13,}]"
                     f"{'':4}{p_e:^8.3f}"
                     f"{'':4}{f_e:>13.3f}"
                     f"{'':4}{'[X]' if x > self.edges[s][d].u else '[ ]'}"
@@ -331,3 +320,26 @@ class LNGraph:
             f"Effective fee rate: {100 * total_fee_in_sats / self.A:7.3f} %\n"
             f"Total probability:  {100 * total_probability:7.3f} %\n"
         )
+
+    def print_payment(self, payment: Payment) -> None:
+        print(
+            f"{'Onion':>5}{'':4}{'Amount':>13}{'':4}"
+            f"{'Failed Hop':^14}{'':4}{'Path':^29}"
+        )
+
+        for i, onion in enumerate(payment.onions):
+            print(f"{i:>5}{'':4}{onion.amount:>13,}{'':4}", end="")
+
+            if onion.failure_source_index == -1:
+                print(f"{'':14}{'':4}", end="[ ")
+            else:
+                s, d = onion.failed_hop
+                print(f"({s:>5}, {d:>5}){'':4}", end="[ ")
+
+            for s, _ in onion.upstream_hops():
+                print(f"{s:>5}", end=" --> ")
+            for s, _ in onion.downstream_hops():
+                print(f"{s:>5}", end="     ")
+            print(f"{onion.path[-1]:>5} ]")
+
+        print()
