@@ -7,6 +7,18 @@ from random import randint
 from ortools.graph.python import min_cost_flow  # type: ignore
 
 
+class bcolors:
+    HEADER = "\033[95m"
+    OKBLUE = "\033[94m"
+    OKCYAN = "\033[96m"
+    OKGREEN = "\033[92m"
+    WARNING = "\033[93m"
+    FAIL = "\033[91m"
+    ENDC = "\033[0m"
+    BOLD = "\033[1m"
+    UNDERLINE = "\033[4m"
+
+
 class Arc:
     def __init__(self, s: int, d: int, c: int, unit_cost: int) -> None:
         self.s = s
@@ -209,56 +221,43 @@ class LNGraph:
         # For good onions, reduce lower and upper bounds of each hop by onion amount
         for onion in payment.good_onions():
             for s, d in onion.hops():
-                sd = self.edges[s][d]
-                self.edges[s][d].lower = max(sd.lower - onion.amount, 0)
+                self.edges[s][d].lower = max(self.edges[s][d].lower - onion.amount, 0)
                 self.edges[s][d].upper -= onion.amount
                 self.edges[s][d].u -= onion.amount
 
-                assert 0 <= sd.lower
+                assert 0 <= self.edges[s][d].lower
+                assert self.edges[s][d].lower <= self.edges[s][d].u
+                assert self.edges[s][d].u <= self.edges[s][d].upper
+                assert self.edges[s][d].upper <= self.edges[s][d].c
 
-                assert sd.lower <= sd.u
-
-                # FIXME: This fails after several attempts.
-                # Both upper and lower have warnings.
-                # Only happens when `use_known` is False.
-                assert sd.u <= sd.upper
-
-                assert sd.upper <= sd.c
-
-                ds = self.edges[d][s]
                 self.edges[d][s].lower += onion.amount
-                self.edges[d][s].upper = min(ds.upper + onion.amount, ds.c)
+                self.edges[d][s].upper = min(
+                    self.edges[d][s].upper + onion.amount, self.edges[d][s].c
+                )
                 self.edges[d][s].u += onion.amount
 
-                assert 0 <= ds.lower <= ds.u <= ds.upper <= ds.c
+                assert 0 <= self.edges[d][s].lower
+                assert self.edges[d][s].lower <= self.edges[d][s].u
+                assert self.edges[d][s].u <= self.edges[d][s].upper
+                assert self.edges[d][s].upper <= self.edges[d][s].c
 
-        # NOTE: Something is wrong with these lines
-        # Initialize bounds_delta lists
-        bounds_delta: dict[int, dict[int, list[int]]] = {}
-        for onion in payment.bad_onions():
-            for s, d in onion.upstream_hops() + [onion.failed_hop]:
-                bounds_delta[s] = {d: [0, 0], **bounds_delta.get(s, {})}
-
-        # Record largest upstream and failed amounts for each hop
+        # For each upstream hop in each bad onion, increase lower bound by onion amount
         for onion in payment.bad_onions():
             for s, d in onion.upstream_hops():
-                bounds_delta[s][d][0] = max(bounds_delta[s][d][0], onion.amount)
-            s, d = onion.failed_hop
-            bounds_delta[s][d][1] = max(bounds_delta[s][d][1], onion.amount)
-
-        # Update edge bounds, skipping known balances if available
-        # Note, known balances should have been assigned in `self.__init__()`
-        for s in bounds_delta:
-            for d in bounds_delta[s]:
                 if not self.use_known or (s != self.S and d != self.S):
-                    self.edges[s][d].lower += bounds_delta[s][d][0]
-                    self.edges[s][d].upper -= bounds_delta[s][d][1]
-                    self.edges[d][s].lower = self.edges[d][s].c - self.edges[s][d].upper
-                    self.edges[d][s].upper = self.edges[d][s].c - self.edges[s][d].lower
+                    self.edges[s][d].lower += onion.amount
+
+        # For each failed hop in each bad onion, set upper bound to lower bound plus onion amount
+        for onion in payment.bad_onions():
+            s, d = onion.failed_hop
+            if not self.use_known or (s != self.S and d != self.S):
+                self.edges[s][d].upper = min(
+                    self.edges[s][d].lower + onion.amount, self.edges[s][d].upper
+                )
 
         # Update payment amount
         a = sum(o.amount for o in payment.good_onions())
-        self.R -= a
+        self.R -= (a := sum(o.amount for o in payment.good_onions()))
         print(f"Sent {a:<,} sats;", end=" ")
         print(f"{int(self.R):<,} ({100 * self.R / self.A:5.3f} %) remaining")
 
@@ -267,14 +266,7 @@ class LNGraph:
         flag = False
         for s in self.edges:
             for d, edge in self.edges[s].items():
-                if edge.u < edge.lower:
-                    print(f"WARNING: ({s:>5}, {d:>5}) has u < lower", end="\t")
-                    print(f"({edge.u:>13,} < {edge.lower:>13,})")
-                    flag = True
-                if edge.upper < edge.u:
-                    print(f"WARNING: ({s:>5}, {d:>5}) has upper < u", end="\t")
-                    print(f"({edge.upper:>13,} < {edge.u:>13,})")
-                    flag = True
+                assert 0 <= edge.lower <= edge.u <= edge.upper <= edge.c
 
         if not flag:
             print("Balance bounds check passed")
@@ -307,8 +299,6 @@ class LNGraph:
             print(f"WARNING: Destination inbound capacity < payment amount")
         print()
 
-    # FIXME: (14755, 18331) is marked as failed by `print_flow()`,
-    #        but it's downstream according to `print_payment()`
     def print_flow(self, flow: dict[int, dict[int, int]]) -> None:
         # Print results
         print(

@@ -2,10 +2,10 @@ from mpp.mpptypes import LNGraph
 
 
 # Set parameters
-A = 1e8
+A = 1.3e8
 N = 5
 Q = 1000
-MAX_ATTEMPTS = 6
+MAX_ATTEMPTS = 10
 USE_KNOWN_BALANCES = False
 
 
@@ -36,4 +36,4 @@ for attempt in range(MAX_ATTEMPTS):
     G.update_bounds(payment)
     G.check_bounds()
 
-print(f"Payment failed in {G.time:.3f} seconds after {MAX_ATTEMPTS} attempts")
+print(f"Payment failed after {MAX_ATTEMPTS} attempts in {G.time:.3f} seconds")
