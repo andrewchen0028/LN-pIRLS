@@ -1,19 +1,10 @@
 from pickle import load
-from scipy.sparse import dok_array, csc_array
+from scipy.sparse import dok_array, diags
 from scipy.sparse.linalg import cg
-from time import time
 
 from mpp.mpptypes import Channel
 
 import numpy as np
-import tracemalloc as tm
-
-
-def is_diagonally_dominant(A: np.ndarray):
-    diagonal = np.abs(A.diagonal())
-    row_sums = np.sum(np.abs(A), axis=1)
-
-    return np.all(diagonal >= row_sums - diagonal)
 
 
 def is_graph_laplacian(A: np.ndarray):
@@ -41,17 +32,38 @@ def is_graph_laplacian(A: np.ndarray):
     return True
 
 
+def print_stats(x: np.ndarray) -> None:
+    print(f"{np.min(x):.2e}\t{np.max(x):.2e}\t", end="")
+    print(f"{np.mean(x):.2e}\t{np.median(x):.2e}\t{np.std(x):.2e}")
+
+
 # NOTE: outputs are extremely small (~1e-10)
+# TODO: Try scaling coefficients by channel capacity
 def uncertainty_coefficient(s: int, d: int) -> float:
     return -((2 / G[s][d].upper) ** 2) * np.log(1 / 2)
 
 
 def fee_rate_decimal(s: int, d: int) -> float:
-    return 1e6 * G[s][d].r
+    return 1e-6 * G[s][d].r
 
 
 def base_fee_satoshi(s: int, d: int) -> float:
-    return 1e3 * G[s][d].b
+    return 1e-3 * G[s][d].b
+
+
+def J(A: np.ndarray, b: np.ndarray, f: np.ndarray) -> float:
+    J1 = (1 / 2) * f.T @ diags(np.square(A).flatten()) @ f
+    J2 = b.flatten() @ np.abs(f)
+    return J1 + J2
+
+
+def Q(A: np.ndarray, b: np.ndarray, x: np.ndarray) -> float:
+    f = W @ C.T @ x.reshape(n, 1)
+    J1 = (1 / 2) * f.T @ diags(np.square(A).flatten()) @ f
+    J2 = b.flatten() @ np.abs(f)
+    print(f"{(J1 + J2).flatten()[0]:.6e}\t{np.min(x):.6e}\t{np.max(x):.6e}\t", end="")
+    print(f"{np.mean(x):.2e}\t{np.median(x):.2e}\t{np.std(x):.2e}")
+    return J1 + J2
 
 
 # Load channel graph and set parameters
@@ -71,9 +83,13 @@ edges: set[frozenset[int]] = {frozenset({s, d}) for s in G for d in G[s]}
 m: int = len(edges)
 
 # Uncertainty coefficients (m x m)
+#   min         max         avg         med         std
+#   1.414e-18   2.291e-06   3.913e-10   2.772e-12   1.251e-08
 A = np.array([[uncertainty_coefficient(*tuple(e)) for e in edges]]).T
 
 # Proportional fee rates (m x 1)
+#   min         max         avg         med         std
+#   0.00000     3758.28505  0.09531     0.00015     17.60490
 b = np.array([[fee_rate_decimal(*tuple(e))] for e in edges]).T
 
 # Node-edge incidence matrix (n x m)
@@ -81,42 +97,57 @@ C = dok_array((n, m), dtype=int)
 for e, edge in enumerate(edges):
     C[tuple(edge)[0], e] = -1  # -1 if edge e exits node i
     C[tuple(edge)[1], e] = +1  # +1 if edge e enters node i
+C = C.tocsc()
 
 # Node demand vector (n x 1)
 d = np.zeros((n, 1), dtype=int)
 d[SRC] += int(AMT)
 d[DST] -= int(AMT)
 
-# NOTE: Need sparse / fast-Laplacian solvers to handle these systems
-# Solving "Lx = b" with spsolve(L, b) takes ~30s
+# Graph Laplacian (n x n)
+L = C @ C.T
 
-# Initial solution with unity weighting (min ||Cx - d||^2)
-C = csc_array(C)
-L = C @ C.transpose()
+# Initial flow vector solution (m x 1)
+f = C.T @ cg(L, d)[0]
+print(f"Initial cost: {J(A, b, f):.2f}")
+print(f"min|f|: {np.min(np.abs(f))}")
 
-print("Solving Lx = b with cg...")
-start = time()
-tm.start()
+# Iterate
+for i in range(1):
+    # W: (m x m) diagonal weight matrix
+    #       min         max         avg         med         std
+    #   w1  2.001e-36   5.250e-12   1.568e-16   7.687e-24   2.688e-14
+    #   w2  0.000       1.114e+01   6.105e-04   3.700e-07   5.838e-02
+    w1 = np.square(A)
+    w2 = (b / np.clip(np.abs(f), 1, None)).T
+    W = diags(np.reciprocal(w1 + w2).flatten())
 
-x = cg(L, d)
-print(f"Elapsed time: {time() - start:.2f}s")
-print(f"Peak memory usage: {list(tm.get_traced_memory())[1] / 1e6:.2f}MB")
-tm.stop()
+    # TODO: Investigate nature of weight matrix, because this is
+    #       the only place where the iterative routine differs
+    # NOTE: Maybe we need to "weight" the weight matrix; i.e, add "mu"
+    #       to balance the relative magnitudes of w1 andw2.
 
-if not (failure_code := list(x)[1]):
-    f = C.T @ list(x)[0]
-    print(f)
-    print(f"C@f close to d: {np.allclose(C @ f, d)}")
-    print(f"Max d values: {np.sort(C @ f, axis=0)[-4:]}")
-    print(f"Min d values: {np.sort(C @ f, axis=0)[:4]}")
-elif failure_code > 0:
-    print(f"Failed to converge in {failure_code} iterations")
-else:
-    print(f"illegal input or breakdown")
+    # """
+    # Weighted graph Laplacian (m x m)
+    print("Computing L")
+    L = C @ W @ C.T
 
+    # Weighted node demand vector (n x 1)
+    print("Computing x")
+    result = cg(L, d, maxiter=10000, callback=lambda x: Q(A, b, x))
+    if result[1] != 0:
+        print("WARNING: CG solver did not converge")
+        print(result[1])
+    x = result[0]
 
-# # Iterate
-# for i in range(6):
-#     W = A.T @ A + np.diag((b / np.abs(x)).T[0])
-#     R = np.linalg.pinv(W)
-#     x = R @ C.T @ np.linalg.pinv(C @ R @ C.T) @ d
+    # # Weighted flow vector solution (m x 1)
+    # f = C.T @ x
+    # print(f"Cost: {J(A, b, f):.2f}")
+    # print(f"x: {x}")
+    # print(f"f: {f}")
+    # print(f"{np.sort(C @ f)[-4:]}")
+    # print(f"{np.sort(C @ f)[:4]}")
+
+    # NOTE: seems like weighted flow should be this
+    # f = W @ C.T @ x.reshape(6, 1)
+    # """
