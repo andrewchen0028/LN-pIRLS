@@ -1,8 +1,42 @@
 from pickle import load
+from scipy.sparse import dok_array, csc_array
+from scipy.sparse.linalg import lsqr, spsolve
+
+from mpp.mpptypes import Channel
 
 import numpy as np
 
-from mpp.mpptypes import Channel
+
+def is_diagonally_dominant(A: np.ndarray):
+    diagonal = np.abs(A.diagonal())
+    row_sums = np.sum(np.abs(A), axis=1)
+
+    return np.all(diagonal >= row_sums - diagonal)
+
+
+def is_graph_laplacian(A: np.ndarray):
+    # Check if the input is a 2D square matrix
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        print("Matrix is not square")
+        return False
+
+    # Check if the matrix is symmetric
+    if not np.allclose(A, A.T):
+        print("Matrix is not symmetric")
+        return False
+
+    # Check if the diagonal elements are non-negative
+    if np.any(np.diag(A) < 0):
+        print("Matrix has negative diagonal elements")
+        return False
+
+    # Check if the matrix has zero row sums
+    if np.any(np.sum(A, axis=1) != 0):
+        print("Matrix has non-zero row sums")
+        return False
+
+    print("Matrix is a graph Laplacian")
+    return True
 
 
 # NOTE: outputs are extremely small (~1e-10)
@@ -25,49 +59,70 @@ DST: int = 16154
 AMT: int = int(0.5e8)
 
 # Count nodes
-node_ids: set[int] = set()
+node_ids: set[int] = {s for s in G}
 for s in G:
-    node_ids.add(s)
-    for d in G[s]:
-        node_ids.add(d)
+    node_ids.update(d for d in G[s])
 n: int = len(node_ids)
 
 # Count edges (both directions count as one)
-edges: set[frozenset[int]] = set()
-for s in G:
-    for d in G[s]:
-        edges.add(frozenset({s, d}))
+edges: set[frozenset[int]] = {frozenset({s, d}) for s in G for d in G[s]}
 m: int = len(edges)
 
-# Map edges "{s, d}" to indices "e"
-edge_to_index: dict[frozenset[int, int], int] = {e: i for i, e in enumerate(edges)}
-index_to_edge: dict[int, frozenset[int, int]] = {i: e for i, e in enumerate(edges)}
-
 # Uncertainty coefficients (m x m)
-A = np.array([[uncertainty_coefficient(s, d) for s, d in index_to_edge.values()]]).T
+A = np.array([[uncertainty_coefficient(*tuple(e)) for e in edges]]).T
 
 # Proportional fee rates (m x 1)
-b = np.array([[fee_rate_decimal(s, d) for s, d in index_to_edge.values()]]).T
+b = np.array([[fee_rate_decimal(*tuple(e))] for e in edges]).T
 
 # Node-edge incidence matrix (n x m)
-C = np.zeros((n, m), dtype=int)
-for e, edge in index_to_edge.items():
-    C[tuple(edge)[0]][e] = -1  # -1 if edge e exits node i
-    C[tuple(edge)[1]][e] = +1  # +1 if edge e enters node i
+C = dok_array((n, m), dtype=int)
+for e, edge in enumerate(edges):
+    C[tuple(edge)[0], e] = -1  # -1 if edge e exits node i
+    C[tuple(edge)[1], e] = +1  # +1 if edge e enters node i
 
 # Node demand vector (n x 1)
 d = np.zeros((n, 1), dtype=int)
 d[SRC] += int(AMT)
 d[DST] -= int(AMT)
 
-"""
-NOTE: Need sparse / fast-Laplacian solvers to handle these systems
-# Initial solution with unity weighting
-x = C.T @ np.linalg.pinv(C @ C.T) @ d
+# NOTE: Need sparse / fast-Laplacian solvers to handle these systems
+# Initial solution with unity weighting (min ||Cx - d||^2)
+C = csc_array(C)
+L = C @ C.transpose()
 
-# Iterate
-for i in range(6):
-    W = A.T @ A + np.diag((b / np.abs(x)).T[0])
-    R = np.linalg.pinv(W)
-    x = R @ C.T @ np.linalg.pinv(C @ R @ C.T) @ d
-"""
+# print(is_diagonally_dominant(L.toarray()))
+# print(is_graph_laplacian(L.toarray()))
+
+import time
+
+# Solving "Lx = b" with spsolve(L, b) takes ~30s
+
+start = time.time()
+print("Solving system...")
+x = spsolve(L, d)
+print(f"Elapsed: {time.time() - start:.2f}s")
+print(f"Found x of length {len(x)}, with {np.count_nonzero(x)} non-zero entries")
+f = C.T @ x
+Cf = C @ f
+
+print(Cf[0])
+
+# Get average of Cf
+avg = np.mean(Cf)
+sd = np.std(Cf)
+print(f"Average Cf: {avg:.2f}, std: {sd:.2f}")
+
+# Count entries with Cf more than 6sd above mean
+print(f"Entries more than 6sd above mean: {np.count_nonzero(Cf > avg + 6*sd)}")
+
+# print(np.allclose(C @ f, d))
+
+
+# print("Solving system...")
+# x = lsqr(C, d)
+
+# # Iterate
+# for i in range(6):
+#     W = A.T @ A + np.diag((b / np.abs(x)).T[0])
+#     R = np.linalg.pinv(W)
+#     x = R @ C.T @ np.linalg.pinv(C @ R @ C.T) @ d
