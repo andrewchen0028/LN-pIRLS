@@ -1,10 +1,12 @@
 from pickle import load
 from scipy.sparse import dok_array, csc_array
-from scipy.sparse.linalg import lsqr, spsolve
+from scipy.sparse.linalg import cg
+from time import time
 
 from mpp.mpptypes import Channel
 
 import numpy as np
+import tracemalloc as tm
 
 
 def is_diagonally_dominant(A: np.ndarray):
@@ -86,40 +88,32 @@ d[SRC] += int(AMT)
 d[DST] -= int(AMT)
 
 # NOTE: Need sparse / fast-Laplacian solvers to handle these systems
+# Solving "Lx = b" with spsolve(L, b) takes ~30s
+
 # Initial solution with unity weighting (min ||Cx - d||^2)
 C = csc_array(C)
 L = C @ C.transpose()
 
-# print(is_diagonally_dominant(L.toarray()))
-# print(is_graph_laplacian(L.toarray()))
+print("Solving Lx = b with cg...")
+start = time()
+tm.start()
 
-import time
+x = cg(L, d)
+print(f"Elapsed time: {time() - start:.2f}s")
+print(f"Peak memory usage: {list(tm.get_traced_memory())[1] / 1e6:.2f}MB")
+tm.stop()
 
-# Solving "Lx = b" with spsolve(L, b) takes ~30s
+if not (failure_code := list(x)[1]):
+    f = C.T @ list(x)[0]
+    print(f)
+    print(f"C@f close to d: {np.allclose(C @ f, d)}")
+    print(f"Max d values: {np.sort(C @ f, axis=0)[-4:]}")
+    print(f"Min d values: {np.sort(C @ f, axis=0)[:4]}")
+elif failure_code > 0:
+    print(f"Failed to converge in {failure_code} iterations")
+else:
+    print(f"illegal input or breakdown")
 
-start = time.time()
-print("Solving system...")
-x = spsolve(L, d)
-print(f"Elapsed: {time.time() - start:.2f}s")
-print(f"Found x of length {len(x)}, with {np.count_nonzero(x)} non-zero entries")
-f = C.T @ x
-Cf = C @ f
-
-print(Cf[0])
-
-# Get average of Cf
-avg = np.mean(Cf)
-sd = np.std(Cf)
-print(f"Average Cf: {avg:.2f}, std: {sd:.2f}")
-
-# Count entries with Cf more than 6sd above mean
-print(f"Entries more than 6sd above mean: {np.count_nonzero(Cf > avg + 6*sd)}")
-
-# print(np.allclose(C @ f, d))
-
-
-# print("Solving system...")
-# x = lsqr(C, d)
 
 # # Iterate
 # for i in range(6):
