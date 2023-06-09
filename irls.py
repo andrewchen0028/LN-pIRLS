@@ -33,6 +33,7 @@ def is_graph_laplacian(A: np.ndarray):
 
 
 def print_stats(x: np.ndarray) -> None:
+    print(f"min\t\tmax\t\tmean\t\tmedian\t\tstd")
     print(f"{np.min(x):.2e}\t{np.max(x):.2e}\t", end="")
     print(f"{np.mean(x):.2e}\t{np.median(x):.2e}\t{np.std(x):.2e}")
 
@@ -61,13 +62,13 @@ def Q(A: np.ndarray, b: np.ndarray, x: np.ndarray) -> float:
     f = W @ C.T @ x.reshape(n, 1)
     J1 = (1 / 2) * f.T @ diags(np.square(A).flatten()) @ f
     J2 = b.flatten() @ np.abs(f)
-    print(f"{(J1 + J2).flatten()[0]:.3e}\t{np.min(x):.3e}\t{np.max(x):.3e}\t", end="")
-    print(f"{np.mean(x):.3e}\t{np.median(x):.3e}\t{np.std(x):.3e}")
+    print(f"{(J1 + J2).flatten()[0]:.3e}\t{np.min(f):.3e}\t{np.max(f):.3e}\t")
+    print(f"\tResidual: {np.linalg.norm(L @ x - d)}")
     return J1 + J2
 
 
 # Load channel graph and set parameters
-G: dict[int, dict[int, Channel]] = load(open("channels_processed.pkl", "rb"))
+G: dict[int, dict[int, Channel]] = load(open("channels_generated.pkl", "rb"))
 SRC: int = 4872
 DST: int = 16154
 AMT: int = int(0.5e8)
@@ -119,18 +120,29 @@ for i in range(1):
     #       min         max         avg         med         std
     #   w1  2.001e-36   5.250e-12   1.568e-16   7.687e-24   2.688e-14
     #   w2  0.000       1.114e+01   6.105e-04   3.700e-07   5.838e-02
-    # ^^ these stats prior to multiplying w1 by 1e13 and adding 1 ^^
+    # NOTE: A *= 1e13 to bring max(w1, w2) to same order of magnitude
+    # NOTE: Padded w1 with 1 to avoid division by zero
     w1 = np.square(A) * 1e13 + 1
-    w2 = (b / np.clip(np.abs(f), 1, None)).T
+    w2 = (b / (np.abs(f) + 1)).T
     W = diags(np.reciprocal(w1 + w2).flatten())
 
+    print_stats(w1)
+    print_stats(w2)
+
     # Weighted graph Laplacian (m x m)
-    print("Computing L")
+    print("Computing weighted Laplacian")
     L = C @ W @ C.T
 
     # Weighted node demand vector (n x 1)
     print("Computing x")
-    result = cg(L, d, x, maxiter=256, callback=lambda x: Q(A, b, x))
+    print("J\t\tmin(f)\t\tmax(f)")
+    result = cg(
+        L,
+        d,
+        x,
+        maxiter=256,
+        callback=lambda x: Q(A, b, x),
+    )
     if result[1] != 0:
         print("WARNING: CG solver did not converge")
         print(result[1])
@@ -139,6 +151,7 @@ for i in range(1):
     # Weighted flow vector solution (m x 1)
     f = W @ C.T @ x.reshape(n, 1)
     d_out = (C @ f).flatten()
-    print(f"{np.sort(d_out)[-4:]}")
-    print(f"{np.sort(d_out)[:4]}")
-    print_stats(C @ f)
+    print(f"max(d): {np.sort(d_out)[-4:]}")
+    print(f"min(d): {np.sort(d_out)[:4]}\n")
+    print(f"d stats:")
+    print_stats(d_out)
