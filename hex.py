@@ -35,7 +35,7 @@ print(f"{x.T}\t{J(A, b, x)}")
 
 # Iterate
 for i in range(6):
-    W = A.T @ A + np.diag((b / np.abs(x)).T[0])
+    W = A.T @ A + np.diag((b / np.abs(x)).T[0]) # + np.eye(7)
     R = np.linalg.pinv(W)
     x = R @ C.T @ np.linalg.pinv(C @ R @ C.T) @ d
     print(f"{x.T}\t{J(A, b, x)}")

@@ -54,15 +54,15 @@ def base_fee_satoshi(s: int, d: int) -> float:
 def J(A: np.ndarray, b: np.ndarray, f: np.ndarray) -> float:
     J1 = (1 / 2) * f.T @ diags(np.square(A).flatten()) @ f
     J2 = b.flatten() @ np.abs(f)
-    return J1 + J2
+    return (J1 + J2).flatten()[0]
 
 
 def Q(A: np.ndarray, b: np.ndarray, x: np.ndarray) -> float:
     f = W @ C.T @ x.reshape(n, 1)
     J1 = (1 / 2) * f.T @ diags(np.square(A).flatten()) @ f
     J2 = b.flatten() @ np.abs(f)
-    print(f"{(J1 + J2).flatten()[0]:.6e}\t{np.min(x):.6e}\t{np.max(x):.6e}\t", end="")
-    print(f"{np.mean(x):.2e}\t{np.median(x):.2e}\t{np.std(x):.2e}")
+    print(f"{(J1 + J2).flatten()[0]:.3e}\t{np.min(x):.3e}\t{np.max(x):.3e}\t", end="")
+    print(f"{np.mean(x):.3e}\t{np.median(x):.3e}\t{np.std(x):.3e}")
     return J1 + J2
 
 
@@ -108,8 +108,9 @@ d[DST] -= int(AMT)
 L = C @ C.T
 
 # Initial flow vector solution (m x 1)
-f = C.T @ cg(L, d)[0]
-print(f"Initial cost: {J(A, b, f):.2f}")
+x = cg(L, d)[0]
+f = C.T @ x
+print(f"Initial cost: {J(A, b, f):.3e}")
 print(f"min|f|: {np.min(np.abs(f))}")
 
 # Iterate
@@ -118,36 +119,26 @@ for i in range(1):
     #       min         max         avg         med         std
     #   w1  2.001e-36   5.250e-12   1.568e-16   7.687e-24   2.688e-14
     #   w2  0.000       1.114e+01   6.105e-04   3.700e-07   5.838e-02
-    w1 = np.square(A)
+    # ^^ these stats prior to multiplying w1 by 1e13 and adding 1 ^^
+    w1 = np.square(A) * 1e13 + 1
     w2 = (b / np.clip(np.abs(f), 1, None)).T
     W = diags(np.reciprocal(w1 + w2).flatten())
 
-    # TODO: Investigate nature of weight matrix, because this is
-    #       the only place where the iterative routine differs
-    # NOTE: Maybe we need to "weight" the weight matrix; i.e, add "mu"
-    #       to balance the relative magnitudes of w1 andw2.
-
-    # """
     # Weighted graph Laplacian (m x m)
     print("Computing L")
     L = C @ W @ C.T
 
     # Weighted node demand vector (n x 1)
     print("Computing x")
-    result = cg(L, d, maxiter=10000, callback=lambda x: Q(A, b, x))
+    result = cg(L, d, x, maxiter=256, callback=lambda x: Q(A, b, x))
     if result[1] != 0:
         print("WARNING: CG solver did not converge")
         print(result[1])
     x = result[0]
 
-    # # Weighted flow vector solution (m x 1)
-    # f = C.T @ x
-    # print(f"Cost: {J(A, b, f):.2f}")
-    # print(f"x: {x}")
-    # print(f"f: {f}")
-    # print(f"{np.sort(C @ f)[-4:]}")
-    # print(f"{np.sort(C @ f)[:4]}")
-
-    # NOTE: seems like weighted flow should be this
-    # f = W @ C.T @ x.reshape(6, 1)
-    # """
+    # Weighted flow vector solution (m x 1)
+    f = W @ C.T @ x.reshape(n, 1)
+    d_out = (C @ f).flatten()
+    print(f"{np.sort(d_out)[-4:]}")
+    print(f"{np.sort(d_out)[:4]}")
+    print_stats(C @ f)
