@@ -1,13 +1,19 @@
-from scipy.sparse.linalg import cg
+from juliacall import Main as jl
+
+# import juliacall as jl
+
+from juliacall import Main as jl
+from juliacall import Pkg as jlPkg
+
+# jlPkg.activate(
+#     "./Laplacians.jl-1.4.0"
+# )  # relative path to the folder where `MyPack/Project.toml` should be used here
+
+# jlPkg.activate("./Laplacians.jl")
+jl.seval("using Laplacians.jl")
+
 
 import numpy as np
-
-
-def is_diagonally_dominant(A: np.ndarray):
-    diagonal = np.abs(A.diagonal())
-    row_sums = np.sum(np.abs(A), axis=1)
-
-    return np.all(diagonal >= row_sums - diagonal)
 
 
 def is_graph_laplacian(A: np.ndarray):
@@ -48,16 +54,9 @@ C = np.array(
 
 d = np.array([[-1, 0, 0, 1, 0, 0]]).T
 
-
 L = C @ C.transpose()
-is_graph_laplacian(L)
-
-
-x = cg(L, d)
-
-
-if list(x)[1] == 0:
-    f = C.T @ list(x)[0]
-    print(f)
-else:
-    print("CG failed")
+# jl = juliacall.newmodule("temp")
+jl.println("Hello from Julia!")
+x = jl.rand(range(10), 3, 5)
+x._jl_display()
+print(np.sum(x, axis=0))
