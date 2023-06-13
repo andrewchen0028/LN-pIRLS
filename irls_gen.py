@@ -7,12 +7,12 @@ from mpp.mpptypes import Channel
 import numpy as np
 
 
-# TODO(1):  Clean up this code with Cholesky decomposition.
-#           Try iterating with small graph, use beta=1e-12 if necessary.
-#           Build up to larger graphs and smoothed cost function.
-#           Figure out how to call Julia code from Python.
-#           (https://sites.google.com/a/yale.edu/laplacian/)
-#           (https://github.com/danspielman/Laplacians.jl)
+# TODO:  Clean up this code with Cholesky decomposition.
+#        Try iterating with small graph, use beta=1e-12 if necessary.
+#        Build up to larger graphs and smoothed cost function.
+#        Figure out how to call Julia code from Python.
+#        (https://sites.google.com/a/yale.edu/laplacian/)
+#        (https://github.com/danspielman/Laplacians.jl)
 
 
 def is_graph_laplacian(A: np.ndarray):
